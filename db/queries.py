@@ -1,0 +1,307 @@
+"""Database query functions for March Madness Strategy.
+
+All functions take a DatabaseManager instance and use %s placeholders
+for Neon PostgreSQL.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+from db.database import DatabaseManager
+
+
+# ── Teams ────────────────────────────────────────────────────
+
+def upsert_team(
+    db: DatabaseManager,
+    name: str,
+    conference: str = "",
+    torvik_name: str = "",
+    ncaa_name: str = "",
+    odds_api_name: str = "",
+    short_name: str = "",
+    logo_url: str = "",
+) -> int:
+    """Insert or update a team, returning team_id."""
+    return db.execute_insert(
+        """
+        INSERT INTO teams (name, conference, torvik_name, ncaa_name,
+                           odds_api_name, short_name, logo_url)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (name) DO UPDATE SET
+            conference = COALESCE(NULLIF(EXCLUDED.conference, ''), teams.conference),
+            torvik_name = COALESCE(NULLIF(EXCLUDED.torvik_name, ''), teams.torvik_name),
+            ncaa_name = COALESCE(NULLIF(EXCLUDED.ncaa_name, ''), teams.ncaa_name),
+            odds_api_name = COALESCE(NULLIF(EXCLUDED.odds_api_name, ''), teams.odds_api_name),
+            short_name = COALESCE(NULLIF(EXCLUDED.short_name, ''), teams.short_name),
+            logo_url = COALESCE(NULLIF(EXCLUDED.logo_url, ''), teams.logo_url)
+        RETURNING team_id AS id
+        """,
+        (name, conference, torvik_name, ncaa_name, odds_api_name, short_name, logo_url),
+    )
+
+
+def get_team_by_name(db: DatabaseManager, name: str) -> Optional[dict]:
+    """Look up a team by canonical name."""
+    return db.execute_one("SELECT * FROM teams WHERE name = %s", (name,))
+
+
+def get_team_by_source_name(
+    db: DatabaseManager, source: str, source_name: str
+) -> Optional[dict]:
+    """Look up a team by source-specific name (torvik_name, ncaa_name, odds_api_name)."""
+    col_map = {
+        "torvik": "torvik_name",
+        "ncaa": "ncaa_name",
+        "odds": "odds_api_name",
+    }
+    col = col_map.get(source)
+    if not col:
+        return None
+    return db.execute_one(f"SELECT * FROM teams WHERE {col} = %s", (source_name,))
+
+
+def get_all_teams(db: DatabaseManager) -> list[dict]:
+    """Return all teams ordered by name."""
+    return db.execute("SELECT * FROM teams ORDER BY name")
+
+
+def find_team_id(db: DatabaseManager, name: str) -> Optional[int]:
+    """Find team_id by searching canonical name, then all source name columns."""
+    row = db.execute_one(
+        """
+        SELECT team_id FROM teams
+        WHERE name = %s OR torvik_name = %s OR ncaa_name = %s OR odds_api_name = %s
+        LIMIT 1
+        """,
+        (name, name, name, name),
+    )
+    return row["team_id"] if row else None
+
+
+# ── Torvik Ratings ───────────────────────────────────────────
+
+def upsert_torvik_rating(db: DatabaseManager, team_id: int, season: int, **kwargs) -> int:
+    """Insert or update a Torvik rating row."""
+    cols = ["team_id", "season"] + list(kwargs.keys())
+    placeholders = ", ".join(["%s"] * len(cols))
+    updates = ", ".join(f"{k} = EXCLUDED.{k}" for k in kwargs.keys())
+    values = [team_id, season] + list(kwargs.values())
+
+    return db.execute_insert(
+        f"""
+        INSERT INTO torvik_ratings ({', '.join(cols)})
+        VALUES ({placeholders})
+        ON CONFLICT (team_id, season) DO UPDATE SET {updates}
+        RETURNING id
+        """,
+        values,
+    )
+
+
+def get_torvik_ratings(db: DatabaseManager, season: int) -> list[dict]:
+    """Get all Torvik ratings for a season, joined with team names."""
+    return db.execute(
+        """
+        SELECT t.name, t.conference, tr.*
+        FROM torvik_ratings tr
+        JOIN teams t ON t.team_id = tr.team_id
+        WHERE tr.season = %s
+        ORDER BY tr.rank
+        """,
+        (season,),
+    )
+
+
+def get_team_rating(db: DatabaseManager, team_id: int, season: int) -> Optional[dict]:
+    """Get a specific team's Torvik rating for a season."""
+    return db.execute_one(
+        "SELECT * FROM torvik_ratings WHERE team_id = %s AND season = %s",
+        (team_id, season),
+    )
+
+
+# ── Games ────────────────────────────────────────────────────
+
+def insert_game(db: DatabaseManager, game_id: str, season: int, game_date: str,
+                home_team_id: int, away_team_id: int, home_score: int,
+                away_score: int, is_neutral_site: bool = False,
+                is_tournament: bool = False, tournament_round: str = "") -> None:
+    """Insert a game (skip if game_id already exists)."""
+    db.execute(
+        """
+        INSERT INTO games (game_id, season, game_date, home_team_id, away_team_id,
+                           home_score, away_score, is_neutral_site, is_tournament,
+                           tournament_round)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (game_id) DO NOTHING
+        """,
+        (game_id, season, game_date, home_team_id, away_team_id,
+         home_score, away_score, is_neutral_site, is_tournament, tournament_round),
+    )
+
+
+def get_season_games(db: DatabaseManager, season: int) -> list[dict]:
+    """Get all games for a season with team names."""
+    return db.execute(
+        """
+        SELECT g.*,
+               ht.name AS home_team, at.name AS away_team
+        FROM games g
+        JOIN teams ht ON ht.team_id = g.home_team_id
+        JOIN teams at ON at.team_id = g.away_team_id
+        WHERE g.season = %s
+        ORDER BY g.game_date
+        """,
+        (season,),
+    )
+
+
+def get_tournament_games(db: DatabaseManager, season: int) -> list[dict]:
+    """Get all tournament games for a season."""
+    return db.execute(
+        """
+        SELECT g.*,
+               ht.name AS home_team, at.name AS away_team
+        FROM games g
+        JOIN teams ht ON ht.team_id = g.home_team_id
+        JOIN teams at ON at.team_id = g.away_team_id
+        WHERE g.season = %s AND g.is_tournament = TRUE
+        ORDER BY g.game_date
+        """,
+        (season,),
+    )
+
+
+# ── Vegas Odds ───────────────────────────────────────────────
+
+def upsert_vegas_odds(db: DatabaseManager, game_id: str, spread: float,
+                      total: float, home_ml: int, away_ml: int,
+                      implied_home_prob: float, bookmaker: str = "consensus") -> int:
+    """Insert or update Vegas odds for a game."""
+    return db.execute_insert(
+        """
+        INSERT INTO vegas_odds (game_id, spread, total, home_ml, away_ml,
+                                implied_home_prob, bookmaker)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (game_id, bookmaker) DO UPDATE SET
+            spread = EXCLUDED.spread,
+            total = EXCLUDED.total,
+            home_ml = EXCLUDED.home_ml,
+            away_ml = EXCLUDED.away_ml,
+            implied_home_prob = EXCLUDED.implied_home_prob,
+            fetched_at = NOW()
+        RETURNING id
+        """,
+        (game_id, spread, total, home_ml, away_ml, implied_home_prob, bookmaker),
+    )
+
+
+# ── Tournament Bracket ──────────────────────────────────────
+
+def upsert_bracket_entry(db: DatabaseManager, season: int, team_id: int,
+                         seed: int, region: str, bracket_position: int = 0) -> int:
+    """Insert or update a bracket entry."""
+    return db.execute_insert(
+        """
+        INSERT INTO tournament_bracket (season, team_id, seed, region, bracket_position)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (season, team_id) DO UPDATE SET
+            seed = EXCLUDED.seed,
+            region = EXCLUDED.region,
+            bracket_position = EXCLUDED.bracket_position
+        RETURNING id
+        """,
+        (season, team_id, seed, region, bracket_position),
+    )
+
+
+def get_bracket(db: DatabaseManager, season: int) -> list[dict]:
+    """Get the full tournament bracket with team info."""
+    return db.execute(
+        """
+        SELECT tb.*, t.name, t.conference, t.logo_url
+        FROM tournament_bracket tb
+        JOIN teams t ON t.team_id = tb.team_id
+        WHERE tb.season = %s
+        ORDER BY tb.region, tb.seed
+        """,
+        (season,),
+    )
+
+
+# ── Simulation Results ──────────────────────────────────────
+
+def upsert_simulation_result(
+    db: DatabaseManager, season: int, team_id: int, round_name: str,
+    advancement_pct: float, n_simulations: int,
+    model_version: str = "", leverage: float = None,
+    path_difficulty: float = None,
+) -> int:
+    """Insert or update a simulation result."""
+    return db.execute_insert(
+        """
+        INSERT INTO simulation_results (season, team_id, round, advancement_pct,
+                                        n_simulations, model_version, leverage,
+                                        path_difficulty)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (season, team_id, round, model_version) DO UPDATE SET
+            advancement_pct = EXCLUDED.advancement_pct,
+            n_simulations = EXCLUDED.n_simulations,
+            leverage = EXCLUDED.leverage,
+            path_difficulty = EXCLUDED.path_difficulty,
+            simulated_at = NOW()
+        RETURNING id
+        """,
+        (season, team_id, round_name, advancement_pct, n_simulations,
+         model_version, leverage, path_difficulty),
+    )
+
+
+def get_simulation_results(db: DatabaseManager, season: int,
+                           model_version: str = "") -> list[dict]:
+    """Get simulation results with team info."""
+    if model_version:
+        return db.execute(
+            """
+            SELECT sr.*, t.name, t.conference, t.logo_url,
+                   tb.seed, tb.region
+            FROM simulation_results sr
+            JOIN teams t ON t.team_id = sr.team_id
+            LEFT JOIN tournament_bracket tb ON tb.team_id = sr.team_id AND tb.season = sr.season
+            WHERE sr.season = %s AND sr.model_version = %s
+            ORDER BY sr.advancement_pct DESC
+            """,
+            (season, model_version),
+        )
+    return db.execute(
+        """
+        SELECT sr.*, t.name, t.conference, t.logo_url,
+               tb.seed, tb.region
+        FROM simulation_results sr
+        JOIN teams t ON t.team_id = sr.team_id
+        LEFT JOIN tournament_bracket tb ON tb.team_id = sr.team_id AND tb.season = sr.season
+        WHERE sr.season = %s
+        ORDER BY sr.advancement_pct DESC
+        """,
+        (season,),
+    )
+
+
+# ── Public Picks ────────────────────────────────────────────
+
+def upsert_public_pick(db: DatabaseManager, season: int, team_id: int,
+                       round_name: str, pick_pct: float,
+                       source: str = "espn") -> int:
+    """Insert or update a public pick percentage."""
+    return db.execute_insert(
+        """
+        INSERT INTO public_picks (season, team_id, round, pick_pct, source)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (season, team_id, round, source) DO UPDATE SET
+            pick_pct = EXCLUDED.pick_pct,
+            fetched_at = NOW()
+        RETURNING id
+        """,
+        (season, team_id, round_name, pick_pct, source),
+    )

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Environment
+.env
+.streamlit/secrets.toml
+
+# Data
+data/models/*.joblib
+data/models/*.pkl
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Next.js
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local
+
+# Misc
+*.log
