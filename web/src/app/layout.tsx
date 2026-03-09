@@ -22,6 +22,7 @@ function Nav() {
   const links = [
     { href: "/", label: "Dashboard" },
     { href: "/ratings", label: "Team Ratings" },
+    { href: "/simulate", label: "Simulate" },
     { href: "/simulation", label: "Simulation" },
     { href: "/bracket", label: "Bracket" },
   ];
