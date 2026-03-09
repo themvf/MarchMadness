@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { getDashboardStats, getSimulationResults } from "@/db/queries";
 import {
   Card,

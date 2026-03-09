@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { getSimulationResults, type SimRow } from "@/db/queries";
 import {
   Card,

@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { getTeamRatings } from "@/db/queries";
 import {
   Card,

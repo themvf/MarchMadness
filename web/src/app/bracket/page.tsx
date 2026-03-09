@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { getBracket } from "@/db/queries";
 import {
   Card,
