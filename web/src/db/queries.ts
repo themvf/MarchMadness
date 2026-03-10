@@ -192,6 +192,31 @@ export async function getDashboardStats(season = CURRENT_SEASON) {
   };
 }
 
+// ── Season Games (for Power Rankings) ───────────────────────
+
+export type SeasonGameRow = {
+  gameId: string;
+  homeTeamId: number | null;
+  awayTeamId: number | null;
+  homeScore: number | null;
+  awayScore: number | null;
+  isNeutralSite: boolean | null;
+};
+
+export async function getSeasonGames(season = CURRENT_SEASON): Promise<SeasonGameRow[]> {
+  return db
+    .select({
+      gameId: games.gameId,
+      homeTeamId: games.homeTeamId,
+      awayTeamId: games.awayTeamId,
+      homeScore: games.homeScore,
+      awayScore: games.awayScore,
+      isNeutralSite: games.isNeutralSite,
+    })
+    .from(games)
+    .where(eq(games.season, season));
+}
+
 // ── Head-to-Head Games ──────────────────────────────────────
 
 export type HeadToHeadGameRow = {
