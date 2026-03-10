@@ -23,6 +23,7 @@ function Nav() {
     { href: "/", label: "Dashboard" },
     { href: "/ratings", label: "Team Ratings" },
     { href: "/simulate", label: "Simulate" },
+    { href: "/matchups", label: "Matchups" },
     { href: "/simulation", label: "Simulation" },
     { href: "/bracket", label: "Bracket" },
   ];

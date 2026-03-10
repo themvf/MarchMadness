@@ -1,6 +1,6 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games } from "./schema";
-import { eq, desc, asc, sql, and } from "drizzle-orm";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds } from "./schema";
+import { eq, desc, asc, sql, and, or } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
 
@@ -190,4 +190,68 @@ export async function getDashboardStats(season = CURRENT_SEASON) {
     bracketTeams: bracketCount[0].count,
     simulatedTeams: simCount[0].count,
   };
+}
+
+// ── Head-to-Head Games ──────────────────────────────────────
+
+export type HeadToHeadGameRow = {
+  gameId: string;
+  season: number;
+  gameDate: string;
+  homeTeamId: number | null;
+  awayTeamId: number | null;
+  homeScore: number | null;
+  awayScore: number | null;
+  isNeutralSite: boolean | null;
+  isTournament: boolean | null;
+  tournamentRound: string | null;
+  spread: number | null;
+  total: number | null;
+  homeMl: number | null;
+  awayMl: number | null;
+  impliedHomeProb: number | null;
+};
+
+export async function getHeadToHeadGames(
+  teamAId: number,
+  teamBId: number,
+  season?: number
+): Promise<HeadToHeadGameRow[]> {
+  const matchCondition = or(
+    and(eq(games.homeTeamId, teamAId), eq(games.awayTeamId, teamBId)),
+    and(eq(games.homeTeamId, teamBId), eq(games.awayTeamId, teamAId))
+  )!;
+
+  const whereClause = season
+    ? and(matchCondition, eq(games.season, season))
+    : matchCondition;
+
+  return db
+    .select({
+      gameId: games.gameId,
+      season: games.season,
+      gameDate: games.gameDate,
+      homeTeamId: games.homeTeamId,
+      awayTeamId: games.awayTeamId,
+      homeScore: games.homeScore,
+      awayScore: games.awayScore,
+      isNeutralSite: games.isNeutralSite,
+      isTournament: games.isTournament,
+      tournamentRound: games.tournamentRound,
+      spread: vegasOdds.spread,
+      total: vegasOdds.total,
+      homeMl: vegasOdds.homeMl,
+      awayMl: vegasOdds.awayMl,
+      impliedHomeProb: vegasOdds.impliedHomeProb,
+    })
+    .from(games)
+    .leftJoin(
+      vegasOdds,
+      and(
+        eq(vegasOdds.gameId, games.gameId),
+        eq(vegasOdds.bookmaker, "consensus")
+      )
+    )
+    .where(whereClause)
+    .orderBy(desc(games.gameDate));
 }
