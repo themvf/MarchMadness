@@ -30,12 +30,17 @@ from typing import Any
 import pandas as pd
 
 from db.database import DatabaseManager
+from features.player_features import (
+    NEUTRAL_DEFAULTS,
+    PLAYER_FEATURE_NAMES,
+    compute_all_team_player_features,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def get_team_features(db: DatabaseManager, team_id: int, season: int) -> dict | None:
-    """Load a team's Torvik ratings as a feature dict."""
+    """Load a team's Torvik ratings + player-derived features as a feature dict."""
     row = db.execute_one(
         """
         SELECT tr.*, t.name, t.conference
@@ -47,7 +52,15 @@ def get_team_features(db: DatabaseManager, team_id: int, season: int) -> dict | 
     )
     if not row:
         return None
-    return dict(row)
+
+    result = dict(row)
+
+    # Merge player-derived features
+    player_feats = compute_all_team_player_features(db, season)
+    pf = player_feats.get(team_id, NEUTRAL_DEFAULTS)
+    result.update(pf)
+
+    return result
 
 
 def build_matchup_features(
@@ -113,6 +126,22 @@ def build_matchup_features(
     features["spread"] = spread if spread is not None else 0.0
     features["has_spread"] = 1.0 if spread is not None else 0.0
 
+    # Player-derived features (diffs)
+    # These come pre-merged into the team dicts; fall back to neutral defaults
+    for feat in PLAYER_FEATURE_NAMES:
+        val_a = team_a.get(feat, NEUTRAL_DEFAULTS[feat])
+        val_b = team_b.get(feat, NEUTRAL_DEFAULTS[feat])
+        if feat == "tov_discipline":
+            # Lower TOV% is better, so flip the diff
+            features[f"{feat}_diff"] = val_b - val_a
+        elif feat == "star_concentration" or feat == "freshman_minutes_pct" or feat == "rebound_concentration" or feat == "depth_gap":
+            # These are risk factors: higher = more fragile
+            # Positive diff means team A is LESS fragile (advantage)
+            features[f"{feat}_diff"] = val_b - val_a
+        else:
+            # Higher is better: experience, FT, balance, guard quality
+            features[f"{feat}_diff"] = val_a - val_b
+
     return features
 
 
@@ -130,6 +159,12 @@ def build_training_dataset(db: DatabaseManager, season: int) -> pd.DataFrame:
         "SELECT * FROM torvik_ratings WHERE season = %s", (season,)
     )
     ratings_by_team = {r["team_id"]: dict(r) for r in ratings_rows}
+
+    # Load player-derived features and merge into team dicts
+    player_features = compute_all_team_player_features(db, season)
+    for tid, pf in player_features.items():
+        if tid in ratings_by_team:
+            ratings_by_team[tid].update(pf)
 
     # Load all games for this season
     games = db.execute(
@@ -205,12 +240,24 @@ def build_multi_season_dataset(
 
 # Feature columns used by the model (excludes metadata)
 FEATURE_COLS = [
+    # Team efficiency differentials (original 20)
     "net_eff_diff", "adj_oe_diff", "adj_de_diff",
     "off_vs_def", "def_vs_off",
     "tempo_diff", "expected_tempo", "barthag_diff",
     "efg_diff", "tov_diff", "orb_diff", "ftr_diff",
     "efg_d_diff", "tov_d_diff", "drb_diff", "ftr_d_diff",
     "win_pct_diff", "seed_diff", "spread", "has_spread",
+    # Player-derived features (new 10)
+    "experience_idx_diff",
+    "star_concentration_diff",
+    "depth_gap_diff",
+    "ft_reliability_diff",
+    "three_pt_rate_diff",
+    "tov_discipline_diff",
+    "scoring_balance_diff",
+    "guard_quality_diff",
+    "freshman_minutes_pct_diff",
+    "rebound_concentration_diff",
 ]
 
 

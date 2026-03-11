@@ -28,6 +28,7 @@ from config import MODELS_DIR
 from db.database import DatabaseManager
 from db.queries import get_bracket, get_torvik_ratings, upsert_simulation_result
 from features.matchup_builder import build_matchup_features
+from features.player_features import compute_all_team_player_features
 from model.train import load_model, predict_matchup
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,13 @@ class TournamentSimulator:
             if tid:
                 self.ratings[tid] = dict(row)
 
-        print(f"Loaded {len(self.teams)} bracket teams, {len(self.ratings)} ratings")
+        # Merge player-derived features into ratings
+        player_features = compute_all_team_player_features(self.db, self.season)
+        for tid, pf in player_features.items():
+            if tid in self.ratings:
+                self.ratings[tid].update(pf)
+
+        print(f"Loaded {len(self.teams)} bracket teams, {len(self.ratings)} ratings (+ player features)")
 
     def _build_win_prob_matrix(self) -> dict[tuple[int, int], float]:
         """Pre-compute pairwise win probabilities for all bracket teams.

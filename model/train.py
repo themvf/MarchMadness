@@ -53,17 +53,20 @@ def train_model(
 
     print(f"Training on {len(X)} samples, {len(available_cols)} features")
 
-    # XGBoost with reasonable defaults for game prediction
+    # XGBoost tuned for 30-feature enhanced model (v2)
+    # Conservative config: shallower trees + stronger regularization
+    # prevents overfitting to player-derived features while
+    # capturing their signal for tournament prediction
     model = XGBClassifier(
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.05,
-        min_child_weight=5,
+        n_estimators=300,
+        max_depth=3,
+        learning_rate=0.03,
+        min_child_weight=10,
         subsample=0.8,
-        colsample_bytree=0.8,
-        gamma=0.1,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        colsample_bytree=0.75,
+        gamma=0.15,
+        reg_alpha=0.2,
+        reg_lambda=1.5,
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=42,
