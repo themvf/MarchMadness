@@ -113,6 +113,52 @@ TABLES = [
     )
     """,
 
+    # ── Player stats (from Torvik getadvstats) ───────────────
+    """
+    CREATE TABLE IF NOT EXISTS player_stats (
+        id SERIAL PRIMARY KEY,
+        player_id INTEGER NOT NULL,
+        season INTEGER NOT NULL,
+        team_id INTEGER NOT NULL REFERENCES teams(team_id),
+        name TEXT NOT NULL,
+        class TEXT,
+        height TEXT,
+        position TEXT,
+        number INTEGER,
+        games INTEGER,
+        min_pct DOUBLE PRECISION,
+        ortg DOUBLE PRECISION,
+        usage_rate DOUBLE PRECISION,
+        efg DOUBLE PRECISION,
+        ts_pct DOUBLE PRECISION,
+        orb_pct DOUBLE PRECISION,
+        drb_pct DOUBLE PRECISION,
+        ast_pct DOUBLE PRECISION,
+        tov_pct DOUBLE PRECISION,
+        ftm INTEGER,
+        fta INTEGER,
+        ft_pct DOUBLE PRECISION,
+        twofgm INTEGER,
+        twofga INTEGER,
+        twofg_pct DOUBLE PRECISION,
+        threefgm INTEGER,
+        threefga INTEGER,
+        threefg_pct DOUBLE PRECISION,
+        blk_pct DOUBLE PRECISION,
+        stl_pct DOUBLE PRECISION,
+        ftr DOUBLE PRECISION,
+        obpm DOUBLE PRECISION,
+        drtg DOUBLE PRECISION,
+        ppg DOUBLE PRECISION,
+        rpg DOUBLE PRECISION,
+        apg DOUBLE PRECISION,
+        hometown TEXT,
+        birthdate TEXT,
+        fetched_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(player_id, season)
+    )
+    """,
+
     # ── Monte Carlo simulation results ───────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_results (
@@ -142,6 +188,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_bracket_season ON tournament_bracket(season, region)",
     "CREATE INDEX IF NOT EXISTS idx_picks_season ON public_picks(season, team_id)",
     "CREATE INDEX IF NOT EXISTS idx_sim_season ON simulation_results(season, team_id)",
+    "CREATE INDEX IF NOT EXISTS idx_player_stats_team ON player_stats(team_id, season)",
+    "CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_stats(player_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",

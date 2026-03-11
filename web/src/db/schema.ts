@@ -129,9 +129,58 @@ export const simulationResults = pgTable(
   ]
 );
 
+export const playerStats = pgTable(
+  "player_stats",
+  {
+    id: serial("id").primaryKey(),
+    playerId: integer("player_id").notNull(),
+    season: integer("season").notNull(),
+    teamId: integer("team_id")
+      .notNull()
+      .references(() => teams.teamId),
+    name: text("name").notNull(),
+    class: text("class"),
+    height: text("height"),
+    position: text("position"),
+    number: integer("number"),
+    games: integer("games"),
+    minPct: doublePrecision("min_pct"),
+    ortg: doublePrecision("ortg"),
+    usageRate: doublePrecision("usage_rate"),
+    efg: doublePrecision("efg"),
+    tsPct: doublePrecision("ts_pct"),
+    orbPct: doublePrecision("orb_pct"),
+    drbPct: doublePrecision("drb_pct"),
+    astPct: doublePrecision("ast_pct"),
+    tovPct: doublePrecision("tov_pct"),
+    ftm: integer("ftm"),
+    fta: integer("fta"),
+    ftPct: doublePrecision("ft_pct"),
+    twofgm: integer("twofgm"),
+    twofga: integer("twofga"),
+    twofgPct: doublePrecision("twofg_pct"),
+    threefgm: integer("threefgm"),
+    threefga: integer("threefga"),
+    threefgPct: doublePrecision("threefg_pct"),
+    blkPct: doublePrecision("blk_pct"),
+    stlPct: doublePrecision("stl_pct"),
+    ftr: doublePrecision("ftr"),
+    obpm: doublePrecision("obpm"),
+    drtg: doublePrecision("drtg"),
+    ppg: doublePrecision("ppg"),
+    rpg: doublePrecision("rpg"),
+    apg: doublePrecision("apg"),
+    hometown: text("hometown"),
+    birthdate: text("birthdate"),
+    fetchedAt: timestamp("fetched_at").defaultNow(),
+  },
+  (t) => [unique("player_stats_player_id_season_key").on(t.playerId, t.season)]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;
 export type Game = typeof games.$inferSelect;
 export type TournamentBracketEntry = typeof tournamentBracket.$inferSelect;
 export type SimulationResult = typeof simulationResults.$inferSelect;
+export type PlayerStat = typeof playerStats.$inferSelect;

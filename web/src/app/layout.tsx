@@ -25,6 +25,7 @@ function Nav() {
     { href: "/power", label: "Power" },
     { href: "/power-plus", label: "Power+" },
     { href: "/simulate", label: "Simulate" },
+    { href: "/players", label: "Players" },
     { href: "/matchups", label: "Matchups" },
     { href: "/simulation", label: "Simulation" },
     { href: "/bracket", label: "Bracket" },

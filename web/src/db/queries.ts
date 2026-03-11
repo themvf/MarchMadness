@@ -1,6 +1,6 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds } from "./schema";
-import { eq, desc, asc, sql, and, or } from "drizzle-orm";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats } from "./schema";
+import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
 
@@ -279,4 +279,130 @@ export async function getHeadToHeadGames(
     )
     .where(whereClause)
     .orderBy(desc(games.gameDate));
+}
+
+// ── Player Stats ──────────────────────────────────────────
+
+export type PlayerStatRow = {
+  playerId: number;
+  name: string;
+  teamId: number;
+  teamName: string;
+  conference: string | null;
+  logoUrl: string | null;
+  class: string | null;
+  height: string | null;
+  position: string | null;
+  games: number | null;
+  minPct: number | null;
+  ppg: number | null;
+  rpg: number | null;
+  apg: number | null;
+  ortg: number | null;
+  usageRate: number | null;
+  efg: number | null;
+  tsPct: number | null;
+  orbPct: number | null;
+  drbPct: number | null;
+  astPct: number | null;
+  tovPct: number | null;
+  blkPct: number | null;
+  stlPct: number | null;
+  ftPct: number | null;
+  threefgPct: number | null;
+  twofgPct: number | null;
+  ftr: number | null;
+  obpm: number | null;
+  drtg: number | null;
+};
+
+export async function getPlayerStats(
+  season = CURRENT_SEASON,
+  minMinPct = 0
+): Promise<PlayerStatRow[]> {
+  const conditions = [eq(playerStats.season, season)];
+  if (minMinPct > 0) {
+    conditions.push(gte(playerStats.minPct, minMinPct));
+  }
+
+  return db
+    .select({
+      playerId: playerStats.playerId,
+      name: playerStats.name,
+      teamId: playerStats.teamId,
+      teamName: teams.name,
+      conference: teams.conference,
+      logoUrl: teams.logoUrl,
+      class: playerStats.class,
+      height: playerStats.height,
+      position: playerStats.position,
+      games: playerStats.games,
+      minPct: playerStats.minPct,
+      ppg: playerStats.ppg,
+      rpg: playerStats.rpg,
+      apg: playerStats.apg,
+      ortg: playerStats.ortg,
+      usageRate: playerStats.usageRate,
+      efg: playerStats.efg,
+      tsPct: playerStats.tsPct,
+      orbPct: playerStats.orbPct,
+      drbPct: playerStats.drbPct,
+      astPct: playerStats.astPct,
+      tovPct: playerStats.tovPct,
+      blkPct: playerStats.blkPct,
+      stlPct: playerStats.stlPct,
+      ftPct: playerStats.ftPct,
+      threefgPct: playerStats.threefgPct,
+      twofgPct: playerStats.twofgPct,
+      ftr: playerStats.ftr,
+      obpm: playerStats.obpm,
+      drtg: playerStats.drtg,
+    })
+    .from(playerStats)
+    .innerJoin(teams, eq(teams.teamId, playerStats.teamId))
+    .where(and(...conditions))
+    .orderBy(desc(playerStats.ppg));
+}
+
+export async function getTeamPlayerStats(
+  teamId: number,
+  season = CURRENT_SEASON
+): Promise<PlayerStatRow[]> {
+  return db
+    .select({
+      playerId: playerStats.playerId,
+      name: playerStats.name,
+      teamId: playerStats.teamId,
+      teamName: teams.name,
+      conference: teams.conference,
+      logoUrl: teams.logoUrl,
+      class: playerStats.class,
+      height: playerStats.height,
+      position: playerStats.position,
+      games: playerStats.games,
+      minPct: playerStats.minPct,
+      ppg: playerStats.ppg,
+      rpg: playerStats.rpg,
+      apg: playerStats.apg,
+      ortg: playerStats.ortg,
+      usageRate: playerStats.usageRate,
+      efg: playerStats.efg,
+      tsPct: playerStats.tsPct,
+      orbPct: playerStats.orbPct,
+      drbPct: playerStats.drbPct,
+      astPct: playerStats.astPct,
+      tovPct: playerStats.tovPct,
+      blkPct: playerStats.blkPct,
+      stlPct: playerStats.stlPct,
+      ftPct: playerStats.ftPct,
+      threefgPct: playerStats.threefgPct,
+      twofgPct: playerStats.twofgPct,
+      ftr: playerStats.ftr,
+      obpm: playerStats.obpm,
+      drtg: playerStats.drtg,
+    })
+    .from(playerStats)
+    .innerJoin(teams, eq(teams.teamId, playerStats.teamId))
+    .where(and(eq(playerStats.teamId, teamId), eq(playerStats.season, season)))
+    .orderBy(desc(playerStats.minPct));
 }
