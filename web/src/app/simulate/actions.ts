@@ -3,8 +3,8 @@
 import { getMatchupTeams, type MatchupTeam } from "@/db/queries";
 
 export type SimulationResult = {
-  teamA: { name: string; logoUrl: string | null; rank: number | null };
-  teamB: { name: string; logoUrl: string | null; rank: number | null };
+  teamA: { teamId: number; name: string; logoUrl: string | null; rank: number | null };
+  teamB: { teamId: number; name: string; logoUrl: string | null; rank: number | null };
   winProbA: number;
   winProbB: number;
   projectedScore: { teamA: number; teamB: number };
@@ -92,11 +92,13 @@ export async function simulateMatchup(
 
   return {
     teamA: {
+      teamId: teamA.teamId,
       name: teamA.name,
       logoUrl: teamA.logoUrl,
       rank: teamA.rank,
     },
     teamB: {
+      teamId: teamB.teamId,
       name: teamB.name,
       logoUrl: teamB.logoUrl,
       rank: teamB.rank,

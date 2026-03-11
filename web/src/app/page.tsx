@@ -4,6 +4,7 @@ import {
   getDashboardStats,
   getSimulationResults,
   getTeamRatingsWithProfile,
+  getTeamProfiles,
 } from "@/db/queries";
 import {
   Card,
@@ -21,12 +22,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ArchetypeBadges } from "@/components/archetype-badges";
 
 export default async function DashboardPage() {
-  const [stats, simRows, ratings] = await Promise.all([
+  const [stats, simRows, ratings, profiles] = await Promise.all([
     getDashboardStats(),
     getSimulationResults(),
     getTeamRatingsWithProfile(),
+    getTeamProfiles(),
   ]);
 
   // Get championship probabilities (round = "Champion")
@@ -79,6 +82,7 @@ export default async function DashboardPage() {
                   <TableHead className="text-right">AdjEM</TableHead>
                   <TableHead className="text-right">EM#</TableHead>
                   <TableHead className="text-right">W-L</TableHead>
+                  <TableHead>Archetypes</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -125,6 +129,9 @@ export default async function DashboardPage() {
                     </TableCell>
                     <TableCell className="text-right font-mono">
                       {t.wins}-{t.losses}
+                    </TableCell>
+                    <TableCell>
+                      <ArchetypeBadges profile={profiles.get(t.teamId)} max={3} />
                     </TableCell>
                   </TableRow>
                 ))}

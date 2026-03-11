@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getTeamRatings, getSeasonGames } from "@/db/queries";
+import { getTeamRatings, getSeasonGames, getTeamProfiles } from "@/db/queries";
 import {
   Card,
   CardContent,
@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ArchetypeBadges } from "@/components/archetype-badges";
 
 type GameRecord = {
   opponentId: number;
@@ -140,9 +141,10 @@ function computeIterativeRatings(
 }
 
 export default async function PowerPlusPage() {
-  const [ratings, gameRows] = await Promise.all([
+  const [ratings, gameRows, profiles] = await Promise.all([
     getTeamRatings(),
     getSeasonGames(),
+    getTeamProfiles(),
   ]);
 
   // Build team info lookup
@@ -373,6 +375,7 @@ export default async function PowerPlusPage() {
                             />
                           )}
                           <span className="font-medium">{e.name}</span>
+                          <ArchetypeBadges profile={profiles.get(e.teamId)} max={2} />
                         </div>
                       </TableCell>
                       <TableCell>

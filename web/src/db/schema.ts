@@ -177,6 +177,29 @@ export const playerStats = pgTable(
   (t) => [unique("player_stats_player_id_season_key").on(t.playerId, t.season)]
 );
 
+export const teamProfiles = pgTable(
+  "team_profiles",
+  {
+    id: serial("id").primaryKey(),
+    teamId: integer("team_id")
+      .notNull()
+      .references(() => teams.teamId),
+    season: integer("season").notNull(),
+    experienceIdx: doublePrecision("experience_idx"),
+    starConcentration: doublePrecision("star_concentration"),
+    depthGap: doublePrecision("depth_gap"),
+    ftReliability: doublePrecision("ft_reliability"),
+    threePtRate: doublePrecision("three_pt_rate"),
+    tovDiscipline: doublePrecision("tov_discipline"),
+    scoringBalance: integer("scoring_balance"),
+    guardQuality: doublePrecision("guard_quality"),
+    freshmanMinutesPct: doublePrecision("freshman_minutes_pct"),
+    reboundConcentration: doublePrecision("rebound_concentration"),
+    computedAt: timestamp("computed_at").defaultNow(),
+  },
+  (t) => [unique("team_profiles_team_id_season_key").on(t.teamId, t.season)]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;
@@ -184,3 +207,4 @@ export type Game = typeof games.$inferSelect;
 export type TournamentBracketEntry = typeof tournamentBracket.$inferSelect;
 export type SimulationResult = typeof simulationResults.$inferSelect;
 export type PlayerStat = typeof playerStats.$inferSelect;
+export type TeamProfile = typeof teamProfiles.$inferSelect;

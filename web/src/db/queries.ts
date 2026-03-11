@@ -1,5 +1,5 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats } from "./schema";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles } from "./schema";
 import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
@@ -405,4 +405,47 @@ export async function getTeamPlayerStats(
     .innerJoin(teams, eq(teams.teamId, playerStats.teamId))
     .where(and(eq(playerStats.teamId, teamId), eq(playerStats.season, season)))
     .orderBy(desc(playerStats.minPct));
+}
+
+// ── Team Profiles (player-derived features) ───────────────
+
+export type TeamProfileRow = {
+  teamId: number;
+  experienceIdx: number | null;
+  starConcentration: number | null;
+  depthGap: number | null;
+  ftReliability: number | null;
+  threePtRate: number | null;
+  tovDiscipline: number | null;
+  scoringBalance: number | null;
+  guardQuality: number | null;
+  freshmanMinutesPct: number | null;
+  reboundConcentration: number | null;
+};
+
+export async function getTeamProfiles(
+  season = CURRENT_SEASON
+): Promise<Map<number, TeamProfileRow>> {
+  const rows = await db
+    .select({
+      teamId: teamProfiles.teamId,
+      experienceIdx: teamProfiles.experienceIdx,
+      starConcentration: teamProfiles.starConcentration,
+      depthGap: teamProfiles.depthGap,
+      ftReliability: teamProfiles.ftReliability,
+      threePtRate: teamProfiles.threePtRate,
+      tovDiscipline: teamProfiles.tovDiscipline,
+      scoringBalance: teamProfiles.scoringBalance,
+      guardQuality: teamProfiles.guardQuality,
+      freshmanMinutesPct: teamProfiles.freshmanMinutesPct,
+      reboundConcentration: teamProfiles.reboundConcentration,
+    })
+    .from(teamProfiles)
+    .where(eq(teamProfiles.season, season));
+
+  const map = new Map<number, TeamProfileRow>();
+  for (const row of rows) {
+    map.set(row.teamId, row);
+  }
+  return map;
 }

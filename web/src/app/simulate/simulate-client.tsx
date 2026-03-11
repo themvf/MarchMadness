@@ -12,6 +12,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { simulateMatchup, type SimulationResult } from "./actions";
+import type { TeamProfileRow } from "@/db/queries";
+import { getArchetypes, archetypeBadgeClass } from "@/lib/archetypes";
 
 type TeamOption = {
   teamId: number;
@@ -21,7 +23,13 @@ type TeamOption = {
   rank: number | null;
 };
 
-export function SimulateClient({ teams }: { teams: TeamOption[] }) {
+export function SimulateClient({
+  teams,
+  profiles,
+}: {
+  teams: TeamOption[];
+  profiles: Record<number, TeamProfileRow>;
+}) {
   const [teamAId, setTeamAId] = useState<number | "">("");
   const [teamBId, setTeamBId] = useState<number | "">("");
   const [result, setResult] = useState<SimulationResult | null>(null);
@@ -140,6 +148,18 @@ export function SimulateClient({ teams }: { teams: TeamOption[] }) {
                         #{result.teamA.rank}
                       </span>
                     )}
+                    {(() => {
+                      const arcs = getArchetypes(profiles[result.teamA.teamId]);
+                      return arcs.slice(0, 3).map((a) => (
+                        <span
+                          key={a.label}
+                          title={a.tip}
+                          className={`inline-flex items-center rounded-full border px-1.5 py-0 text-[9px] font-semibold leading-tight ${archetypeBadgeClass(a.kind)}`}
+                        >
+                          {a.label}
+                        </span>
+                      ));
+                    })()}
                   </span>
                   <span className="font-mono text-lg">
                     {(result.winProbA * 100).toFixed(1)}%
@@ -178,6 +198,18 @@ export function SimulateClient({ teams }: { teams: TeamOption[] }) {
                         #{result.teamB.rank}
                       </span>
                     )}
+                    {(() => {
+                      const arcs = getArchetypes(profiles[result.teamB.teamId]);
+                      return arcs.slice(0, 3).map((a) => (
+                        <span
+                          key={a.label}
+                          title={a.tip}
+                          className={`inline-flex items-center rounded-full border px-1.5 py-0 text-[9px] font-semibold leading-tight ${archetypeBadgeClass(a.kind)}`}
+                        >
+                          {a.label}
+                        </span>
+                      ));
+                    })()}
                   </span>
                   <span className="font-mono text-lg">
                     {(result.winProbB * 100).toFixed(1)}%

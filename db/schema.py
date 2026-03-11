@@ -159,6 +159,27 @@ TABLES = [
     )
     """,
 
+    # ── Team profiles (player-derived features) ─────────────
+    """
+    CREATE TABLE IF NOT EXISTS team_profiles (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(team_id),
+        season INTEGER NOT NULL,
+        experience_idx DOUBLE PRECISION,
+        star_concentration DOUBLE PRECISION,
+        depth_gap DOUBLE PRECISION,
+        ft_reliability DOUBLE PRECISION,
+        three_pt_rate DOUBLE PRECISION,
+        tov_discipline DOUBLE PRECISION,
+        scoring_balance INTEGER,
+        guard_quality DOUBLE PRECISION,
+        freshman_minutes_pct DOUBLE PRECISION,
+        rebound_concentration DOUBLE PRECISION,
+        computed_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(team_id, season)
+    )
+    """,
+
     # ── Monte Carlo simulation results ───────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_results (
@@ -190,6 +211,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sim_season ON simulation_results(season, team_id)",
     "CREATE INDEX IF NOT EXISTS idx_player_stats_team ON player_stats(team_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_stats(player_id, season)",
+    "CREATE INDEX IF NOT EXISTS idx_team_profiles_season ON team_profiles(team_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",

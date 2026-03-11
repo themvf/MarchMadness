@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getTeamRatingsWithProfile } from "@/db/queries";
+import { getTeamRatingsWithProfile, getTeamProfiles } from "@/db/queries";
 import {
   Card,
   CardContent,
@@ -17,9 +17,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ArchetypeBadges } from "@/components/archetype-badges";
 
 export default async function RatingsPage() {
-  const ratings = await getTeamRatingsWithProfile();
+  const [ratings, profiles] = await Promise.all([
+    getTeamRatingsWithProfile(),
+    getTeamProfiles(),
+  ]);
   const champProfileCount = ratings.filter((t) => t.isChampionProfile).length;
 
   return (
@@ -102,6 +106,7 @@ export default async function RatingsPage() {
                             CHAMP
                           </Badge>
                         )}
+                        <ArchetypeBadges profile={profiles.get(t.teamId)} max={3} />
                       </div>
                     </TableCell>
                     <TableCell>
