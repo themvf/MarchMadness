@@ -26,6 +26,7 @@ from db.database import DatabaseManager
 from features.matchup_builder import (
     FEATURE_COLS,
     build_training_dataset,
+    build_multi_season_dataset,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,14 +142,16 @@ if __name__ == "__main__":
     config = load_config()
     db = DatabaseManager(config.database_url)
 
-    print("Building training dataset...")
-    df = build_training_dataset(db, config.model.current_season)
+    # Train on all available seasons (2022-current) for maximum generalization
+    all_seasons = config.model.training_seasons + [config.model.current_season]
+    print(f"Building multi-season dataset ({all_seasons[0]}-{all_seasons[-1]})...")
+    df = build_multi_season_dataset(db, all_seasons)
 
     if df.empty:
         print("No training data available.")
         exit(1)
 
-    print(f"Dataset: {len(df)} games, home win rate: {df['label'].mean():.3f}")
+    print(f"\nDataset: {len(df):,} games, home win rate: {df['label'].mean():.3f}")
     print()
 
     model, metrics = train_model(df)
