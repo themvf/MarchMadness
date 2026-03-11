@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getSimulationResults, type SimRow } from "@/db/queries";
+import { getSimulationResults, getTeamProfiles, type SimRow } from "@/db/queries";
 import {
   Card,
   CardContent,
@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ArchetypeBadges } from "@/components/archetype-badges";
 
 const ROUND_ORDER = ["R64", "R32", "S16", "E8", "F4", "NCG", "Champion"];
 const ROUND_LABELS: Record<string, string> = {
@@ -30,7 +31,10 @@ const ROUND_LABELS: Record<string, string> = {
 };
 
 export default async function SimulationPage() {
-  const rows = await getSimulationResults();
+  const [rows, profiles] = await Promise.all([
+    getSimulationResults(),
+    getTeamProfiles(),
+  ]);
 
   if (rows.length === 0) {
     return (
@@ -117,7 +121,12 @@ export default async function SimulationPage() {
                     <TableCell className="font-mono text-muted-foreground">
                       {i + 1}
                     </TableCell>
-                    <TableCell className="font-medium">{t.name}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">{t.name}</span>
+                        <ArchetypeBadges profile={profiles.get(t.id)} max={2} />
+                      </div>
+                    </TableCell>
                     <TableCell className="text-center">
                       {t.seed ?? "—"}
                     </TableCell>
