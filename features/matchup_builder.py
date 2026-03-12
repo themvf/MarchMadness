@@ -142,7 +142,92 @@ def build_matchup_features(
             # Higher is better: experience, FT, balance, guard quality
             features[f"{feat}_diff"] = val_a - val_b
 
+    # Location-split features
+    for feat in LOCATION_FEATURE_NAMES:
+        val_a = team_a.get(feat, LOCATION_DEFAULTS[feat])
+        val_b = team_b.get(feat, LOCATION_DEFAULTS[feat])
+        if feat == "home_dependency":
+            # Higher home dependency = more vulnerable in tournament (risk factor)
+            # Positive diff = team A is LESS dependent (advantage)
+            features[f"{feat}_diff"] = val_b - val_a
+        else:
+            # Higher away/neutral win pct = better (direct advantage)
+            features[f"{feat}_diff"] = val_a - val_b
+
     return features
+
+
+def compute_location_records(
+    db: DatabaseManager, season: int
+) -> dict[int, dict[str, float]]:
+    """Compute home/away/neutral win records for each team.
+
+    Returns dict[team_id, {home_win_pct, away_win_pct, neutral_win_pct,
+                           home_dependency}]
+    """
+    games = db.execute(
+        """
+        SELECT home_team_id, away_team_id, home_score, away_score, is_neutral_site
+        FROM games WHERE season = %s
+        """,
+        (season,),
+    )
+
+    # Accumulate records: team_id -> {home_w, home_l, away_w, away_l, neut_w, neut_l}
+    records: dict[int, dict[str, int]] = {}
+
+    def ensure(tid: int) -> dict[str, int]:
+        if tid not in records:
+            records[tid] = {
+                "home_w": 0, "home_l": 0,
+                "away_w": 0, "away_l": 0,
+                "neut_w": 0, "neut_l": 0,
+            }
+        return records[tid]
+
+    for g in games:
+        hid, aid = g["home_team_id"], g["away_team_id"]
+        home_won = g["home_score"] > g["away_score"]
+
+        if g["is_neutral_site"]:
+            # Neutral: both teams get neutral record
+            if home_won:
+                ensure(hid)["neut_w"] += 1
+                ensure(aid)["neut_l"] += 1
+            else:
+                ensure(hid)["neut_l"] += 1
+                ensure(aid)["neut_w"] += 1
+        else:
+            # Regular home/away
+            if home_won:
+                ensure(hid)["home_w"] += 1
+                ensure(aid)["away_l"] += 1
+            else:
+                ensure(hid)["home_l"] += 1
+                ensure(aid)["away_w"] += 1
+
+    result = {}
+    for tid, r in records.items():
+        home_total = r["home_w"] + r["home_l"]
+        away_total = r["away_w"] + r["away_l"]
+        neut_total = r["neut_w"] + r["neut_l"]
+
+        home_pct = r["home_w"] / home_total if home_total > 0 else 0.5
+        away_pct = r["away_w"] / away_total if away_total > 0 else 0.5
+        neut_pct = r["neut_w"] / neut_total if neut_total > 0 else 0.5
+
+        result[tid] = {
+            "away_win_pct": away_pct,
+            "neutral_win_pct": neut_pct,
+            # How much a team depends on home court (high = vulnerable on road)
+            "home_dependency": home_pct - away_pct,
+        }
+
+    return result
+
+
+LOCATION_FEATURE_NAMES = ["away_win_pct", "neutral_win_pct", "home_dependency"]
+LOCATION_DEFAULTS = {"away_win_pct": 0.5, "neutral_win_pct": 0.5, "home_dependency": 0.0}
 
 
 def build_training_dataset(db: DatabaseManager, season: int) -> pd.DataFrame:
@@ -165,6 +250,12 @@ def build_training_dataset(db: DatabaseManager, season: int) -> pd.DataFrame:
     for tid, pf in player_features.items():
         if tid in ratings_by_team:
             ratings_by_team[tid].update(pf)
+
+    # Load location-split records and merge
+    location_records = compute_location_records(db, season)
+    for tid, lr in location_records.items():
+        if tid in ratings_by_team:
+            ratings_by_team[tid].update(lr)
 
     # Load all games for this season
     games = db.execute(
@@ -258,6 +349,13 @@ FEATURE_COLS = [
     "guard_quality_diff",
     "freshman_minutes_pct_diff",
     "rebound_concentration_diff",
+]
+
+# Tournament model: base features + location-awareness (33 features)
+TOURNAMENT_FEATURE_COLS = FEATURE_COLS + [
+    "away_win_pct_diff",
+    "neutral_win_pct_diff",
+    "home_dependency_diff",
 ]
 
 

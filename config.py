@@ -54,7 +54,7 @@ class ModelConfig:
     model_type: str = "xgboost"
     n_simulations: int = 10_000
     training_seasons: list = field(
-        default_factory=lambda: [2022, 2023, 2024, 2025]
+        default_factory=lambda: [2021, 2022, 2023, 2024, 2025]
     )
     current_season: int = 2026
 
