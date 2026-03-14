@@ -180,6 +180,34 @@ TABLES = [
     )
     """,
 
+    # ── Bracket matchups (model vs Vegas per matchup) ────────
+    """
+    CREATE TABLE IF NOT EXISTS bracket_matchups (
+        id SERIAL PRIMARY KEY,
+        season INTEGER NOT NULL,
+        round TEXT NOT NULL,
+        region TEXT,
+        matchup_slot INTEGER NOT NULL,
+        team_a_id INTEGER NOT NULL REFERENCES teams(team_id),
+        team_b_id INTEGER NOT NULL REFERENCES teams(team_id),
+        seed_a INTEGER NOT NULL,
+        seed_b INTEGER NOT NULL,
+        model_prob_a DOUBLE PRECISION,
+        log5_prob_a DOUBLE PRECISION,
+        vegas_spread_a DOUBLE PRECISION,
+        vegas_ml_a INTEGER,
+        vegas_ml_b INTEGER,
+        vegas_total DOUBLE PRECISION,
+        vegas_prob_a DOUBLE PRECISION,
+        winner_id INTEGER REFERENCES teams(team_id),
+        score_a INTEGER,
+        score_b INTEGER,
+        game_date DATE,
+        computed_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(season, round, matchup_slot)
+    )
+    """,
+
     # ── Monte Carlo simulation results ───────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_results (
@@ -212,6 +240,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_player_stats_team ON player_stats(team_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_stats(player_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_team_profiles_season ON team_profiles(team_id, season)",
+    "CREATE INDEX IF NOT EXISTS idx_bracket_matchups_season ON bracket_matchups(season, round)",
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",

@@ -230,6 +230,106 @@ def get_bracket(db: DatabaseManager, season: int) -> list[dict]:
     )
 
 
+# ── Bracket Matchups ──────────────────────────────────────
+
+def upsert_bracket_matchup(
+    db: DatabaseManager, season: int, round_name: str, matchup_slot: int,
+    team_a_id: int, team_b_id: int, seed_a: int, seed_b: int,
+    region: str = None, model_prob_a: float = None, log5_prob_a: float = None,
+    vegas_spread_a: float = None, vegas_ml_a: int = None,
+    vegas_ml_b: int = None, vegas_total: float = None,
+    vegas_prob_a: float = None, winner_id: int = None,
+    score_a: int = None, score_b: int = None, game_date: str = None,
+) -> int:
+    """Insert or update a bracket matchup."""
+    return db.execute_insert(
+        """
+        INSERT INTO bracket_matchups (
+            season, round, region, matchup_slot,
+            team_a_id, team_b_id, seed_a, seed_b,
+            model_prob_a, log5_prob_a,
+            vegas_spread_a, vegas_ml_a, vegas_ml_b, vegas_total, vegas_prob_a,
+            winner_id, score_a, score_b, game_date
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (season, round, matchup_slot) DO UPDATE SET
+            team_a_id = EXCLUDED.team_a_id,
+            team_b_id = EXCLUDED.team_b_id,
+            seed_a = EXCLUDED.seed_a,
+            seed_b = EXCLUDED.seed_b,
+            region = EXCLUDED.region,
+            model_prob_a = COALESCE(EXCLUDED.model_prob_a, bracket_matchups.model_prob_a),
+            log5_prob_a = COALESCE(EXCLUDED.log5_prob_a, bracket_matchups.log5_prob_a),
+            vegas_spread_a = COALESCE(EXCLUDED.vegas_spread_a, bracket_matchups.vegas_spread_a),
+            vegas_ml_a = COALESCE(EXCLUDED.vegas_ml_a, bracket_matchups.vegas_ml_a),
+            vegas_ml_b = COALESCE(EXCLUDED.vegas_ml_b, bracket_matchups.vegas_ml_b),
+            vegas_total = COALESCE(EXCLUDED.vegas_total, bracket_matchups.vegas_total),
+            vegas_prob_a = COALESCE(EXCLUDED.vegas_prob_a, bracket_matchups.vegas_prob_a),
+            winner_id = COALESCE(EXCLUDED.winner_id, bracket_matchups.winner_id),
+            score_a = COALESCE(EXCLUDED.score_a, bracket_matchups.score_a),
+            score_b = COALESCE(EXCLUDED.score_b, bracket_matchups.score_b),
+            game_date = COALESCE(EXCLUDED.game_date, bracket_matchups.game_date),
+            computed_at = NOW()
+        RETURNING id
+        """,
+        (season, round_name, region, matchup_slot,
+         team_a_id, team_b_id, seed_a, seed_b,
+         model_prob_a, log5_prob_a,
+         vegas_spread_a, vegas_ml_a, vegas_ml_b, vegas_total, vegas_prob_a,
+         winner_id, score_a, score_b, game_date),
+    )
+
+
+def get_bracket_matchups(db: DatabaseManager, season: int,
+                         round_name: str = None) -> list[dict]:
+    """Get bracket matchups with team info."""
+    if round_name:
+        return db.execute(
+            """
+            SELECT bm.*,
+                   ta.name AS team_a_name, ta.logo_url AS team_a_logo,
+                   ta.conference AS team_a_conf,
+                   tb.name AS team_b_name, tb.logo_url AS team_b_logo,
+                   tb.conference AS team_b_conf
+            FROM bracket_matchups bm
+            JOIN teams ta ON ta.team_id = bm.team_a_id
+            JOIN teams tb ON tb.team_id = bm.team_b_id
+            WHERE bm.season = %s AND bm.round = %s
+            ORDER BY bm.matchup_slot
+            """,
+            (season, round_name),
+        )
+    return db.execute(
+        """
+        SELECT bm.*,
+               ta.name AS team_a_name, ta.logo_url AS team_a_logo,
+               ta.conference AS team_a_conf,
+               tb.name AS team_b_name, tb.logo_url AS team_b_logo,
+               tb.conference AS team_b_conf
+        FROM bracket_matchups bm
+        JOIN teams ta ON ta.team_id = bm.team_a_id
+        JOIN teams tb ON tb.team_id = bm.team_b_id
+        WHERE bm.season = %s
+        ORDER BY bm.round, bm.matchup_slot
+        """,
+        (season,),
+    )
+
+
+def update_matchup_result(db: DatabaseManager, season: int, round_name: str,
+                          matchup_slot: int, winner_id: int,
+                          score_a: int, score_b: int) -> None:
+    """Record the result of a bracket matchup."""
+    db.execute(
+        """
+        UPDATE bracket_matchups
+        SET winner_id = %s, score_a = %s, score_b = %s, computed_at = NOW()
+        WHERE season = %s AND round = %s AND matchup_slot = %s
+        """,
+        (winner_id, score_a, score_b, season, round_name, matchup_slot),
+    )
+
+
 # ── Simulation Results ──────────────────────────────────────
 
 def upsert_simulation_result(

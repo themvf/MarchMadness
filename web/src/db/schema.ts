@@ -200,6 +200,40 @@ export const teamProfiles = pgTable(
   (t) => [unique("team_profiles_team_id_season_key").on(t.teamId, t.season)]
 );
 
+export const bracketMatchups = pgTable(
+  "bracket_matchups",
+  {
+    id: serial("id").primaryKey(),
+    season: integer("season").notNull(),
+    round: text("round").notNull(),
+    region: text("region"),
+    matchupSlot: integer("matchup_slot").notNull(),
+    teamAId: integer("team_a_id")
+      .notNull()
+      .references(() => teams.teamId),
+    teamBId: integer("team_b_id")
+      .notNull()
+      .references(() => teams.teamId),
+    seedA: integer("seed_a").notNull(),
+    seedB: integer("seed_b").notNull(),
+    modelProbA: doublePrecision("model_prob_a"),
+    log5ProbA: doublePrecision("log5_prob_a"),
+    vegasSpreadA: doublePrecision("vegas_spread_a"),
+    vegasMlA: integer("vegas_ml_a"),
+    vegasMlB: integer("vegas_ml_b"),
+    vegasTotal: doublePrecision("vegas_total"),
+    vegasProbA: doublePrecision("vegas_prob_a"),
+    winnerId: integer("winner_id").references(() => teams.teamId),
+    scoreA: integer("score_a"),
+    scoreB: integer("score_b"),
+    gameDate: date("game_date"),
+    computedAt: timestamp("computed_at").defaultNow(),
+  },
+  (t) => [
+    unique("bracket_matchups_season_round_slot_key").on(t.season, t.round, t.matchupSlot),
+  ]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;
@@ -208,3 +242,4 @@ export type TournamentBracketEntry = typeof tournamentBracket.$inferSelect;
 export type SimulationResult = typeof simulationResults.$inferSelect;
 export type PlayerStat = typeof playerStats.$inferSelect;
 export type TeamProfile = typeof teamProfiles.$inferSelect;
+export type BracketMatchup = typeof bracketMatchups.$inferSelect;

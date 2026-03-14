@@ -1,5 +1,5 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles } from "./schema";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups } from "./schema";
 import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
@@ -500,6 +500,81 @@ export async function getGamesWithOdds(season = CURRENT_SEASON): Promise<Diverge
     INNER JOIN teams t2 ON t2.team_id = g.away_team_id
     WHERE g.season = ${season}
     ORDER BY g.game_date DESC
+  `);
+  return result.rows;
+}
+
+// ── Bracket Matchups (Model vs Vegas) ─────────────────────
+
+export type BracketMatchupRow = {
+  id: number;
+  round: string;
+  region: string | null;
+  matchupSlot: number;
+  teamAId: number;
+  teamAName: string;
+  teamALogo: string | null;
+  teamAConf: string | null;
+  seedA: number;
+  teamBId: number;
+  teamBName: string;
+  teamBLogo: string | null;
+  teamBConf: string | null;
+  seedB: number;
+  modelProbA: number | null;
+  log5ProbA: number | null;
+  vegasSpreadA: number | null;
+  vegasProbA: number | null;
+  vegasMlA: number | null;
+  vegasMlB: number | null;
+  vegasTotal: number | null;
+  winnerId: number | null;
+  scoreA: number | null;
+  scoreB: number | null;
+  gameDate: string | null;
+};
+
+export async function getBracketMatchups(
+  season = CURRENT_SEASON,
+  round?: string
+): Promise<BracketMatchupRow[]> {
+  const roundFilter = round
+    ? sql`AND bm.round = ${round}`
+    : sql``;
+
+  const result = await db.execute<BracketMatchupRow>(sql`
+    SELECT
+      bm.id,
+      bm.round,
+      bm.region,
+      bm.matchup_slot as "matchupSlot",
+      bm.team_a_id as "teamAId",
+      ta.name as "teamAName",
+      ta.logo_url as "teamALogo",
+      ta.conference as "teamAConf",
+      bm.seed_a as "seedA",
+      bm.team_b_id as "teamBId",
+      tb.name as "teamBName",
+      tb.logo_url as "teamBLogo",
+      tb.conference as "teamBConf",
+      bm.seed_b as "seedB",
+      bm.model_prob_a as "modelProbA",
+      bm.log5_prob_a as "log5ProbA",
+      bm.vegas_spread_a as "vegasSpreadA",
+      bm.vegas_prob_a as "vegasProbA",
+      bm.vegas_ml_a as "vegasMlA",
+      bm.vegas_ml_b as "vegasMlB",
+      bm.vegas_total as "vegasTotal",
+      bm.winner_id as "winnerId",
+      bm.score_a as "scoreA",
+      bm.score_b as "scoreB",
+      bm.game_date as "gameDate"
+    FROM bracket_matchups bm
+    INNER JOIN teams ta ON ta.team_id = bm.team_a_id
+    INNER JOIN teams tb ON tb.team_id = bm.team_b_id
+    WHERE bm.season = ${season}
+    ${roundFilter}
+    ORDER BY bm.round, bm.matchup_slot
   `);
   return result.rows;
 }

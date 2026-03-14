@@ -30,6 +30,7 @@ function Nav() {
     { href: "/simulation", label: "Simulation" },
     { href: "/bracket", label: "Bracket" },
     { href: "/divergence", label: "Divergence" },
+    { href: "/bracket-matchups", label: "Tournament" },
   ];
 
   return (
