@@ -398,6 +398,31 @@ def update_all(
     print(f"Updated model predictions for {len(matchups)} matchups")
 
 
+def refresh_data(db: DatabaseManager, season: int) -> None:
+    """Re-ingest game data, player stats, and team profiles.
+
+    This updates Torvik ratings with the latest results (including
+    tournament games), refreshes player stats, and recomputes team
+    profiles. Should be run between tournament rounds so later-round
+    predictions reflect actual tournament performance.
+    """
+    from ingest.torvik import ingest_season
+    from ingest.players import ingest_players
+    from ingest.profiles import ingest_profiles
+
+    print("--- Refreshing game data from Barttorvik ---")
+    result = ingest_season(db, season)
+    print(f"  {result['games']} games, {result['ratings']} ratings")
+
+    print("\n--- Refreshing player stats ---")
+    count = ingest_players(db, season)
+    print(f"  {count} players")
+
+    print("\n--- Recomputing team profiles ---")
+    ingest_profiles(db, season)
+    print()
+
+
 if __name__ == "__main__":
     config = load_config()
     db = DatabaseManager(config.database_url)
@@ -411,6 +436,7 @@ if __name__ == "__main__":
         print("  python -m ingest.bracket_matchups --odds 2026-03-20")
         print("  python -m ingest.bracket_matchups --update-all")
         print("  python -m ingest.bracket_matchups --advance R64")
+        print("  python -m ingest.bracket_matchups --refresh")
         print("  python -m ingest.bracket_matchups --result R64 SLOT WINNER_ID SCORE_A SCORE_B")
         print("  python -m ingest.bracket_matchups --show")
         sys.exit(0)
@@ -438,6 +464,12 @@ if __name__ == "__main__":
         print(f"Recomputing all model predictions for season {season}...")
         update_all(db, season)
 
+    elif args[0] == "--refresh":
+        print(f"Refreshing all data for season {season}...")
+        refresh_data(db, season)
+        print("Recomputing model predictions with fresh data...")
+        update_all(db, season)
+
     elif args[0] == "--advance":
         if len(args) < 2:
             print("Usage: --advance PREV_ROUND  (e.g., --advance R64 generates R32)")
@@ -445,7 +477,12 @@ if __name__ == "__main__":
         prev_round = args[1]
         prev_idx = ROUNDS.index(prev_round)
         next_round = ROUNDS[prev_idx + 1]
-        print(f"Advancing {prev_round} winners to generate {next_round} matchups...")
+
+        # Refresh data first so next-round predictions use latest ratings
+        print(f"Refreshing data before generating {next_round} matchups...\n")
+        refresh_data(db, season)
+
+        print(f"\nAdvancing {prev_round} winners to generate {next_round} matchups...")
         count = generate_matchups(db, season, next_round)
         print(f"Done: {count} matchups")
 
