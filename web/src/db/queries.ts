@@ -449,3 +449,57 @@ export async function getTeamProfiles(
   }
   return map;
 }
+
+// ── Divergence (Model vs Vegas) ─────────────────────────────
+
+export type DivergenceRow = {
+  gameId: string;
+  gameDate: string;
+  homeTeamId: number | null;
+  awayTeamId: number | null;
+  homeName: string | null;
+  awayName: string | null;
+  homeLogoUrl: string | null;
+  awayLogoUrl: string | null;
+  homeScore: number | null;
+  awayScore: number | null;
+  homeRank: number | null;
+  awayRank: number | null;
+  homeBarthag: number | null;
+  awayBarthag: number | null;
+  isNeutralSite: boolean | null;
+  spread: number | null;
+  vegasProb: number | null;
+};
+
+export async function getGamesWithOdds(season = CURRENT_SEASON): Promise<DivergenceRow[]> {
+  const result = await db.execute<DivergenceRow>(sql`
+    SELECT
+      g.game_id as "gameId",
+      g.game_date as "gameDate",
+      g.home_team_id as "homeTeamId",
+      g.away_team_id as "awayTeamId",
+      t1.name as "homeName",
+      t2.name as "awayName",
+      t1.logo_url as "homeLogoUrl",
+      t2.logo_url as "awayLogoUrl",
+      g.home_score as "homeScore",
+      g.away_score as "awayScore",
+      tr1.rank as "homeRank",
+      tr2.rank as "awayRank",
+      tr1.barthag as "homeBarthag",
+      tr2.barthag as "awayBarthag",
+      g.is_neutral_site as "isNeutralSite",
+      vo.spread,
+      vo.implied_home_prob as "vegasProb"
+    FROM games g
+    INNER JOIN vegas_odds vo ON vo.game_id = g.game_id AND vo.bookmaker = 'consensus'
+    INNER JOIN torvik_ratings tr1 ON tr1.team_id = g.home_team_id AND tr1.season = g.season
+    INNER JOIN torvik_ratings tr2 ON tr2.team_id = g.away_team_id AND tr2.season = g.season
+    INNER JOIN teams t1 ON t1.team_id = g.home_team_id
+    INNER JOIN teams t2 ON t2.team_id = g.away_team_id
+    WHERE g.season = ${season}
+    ORDER BY g.game_date DESC
+  `);
+  return result.rows;
+}
