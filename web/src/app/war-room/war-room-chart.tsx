@@ -107,6 +107,7 @@ export default function WarRoomChart({ teams }: Props) {
   // Compute averages for reference lines
   const { avgOe, avgDe } = useMemo(() => {
     const valid = teams.filter((t) => t.adjOe != null && t.adjDe != null);
+    if (valid.length === 0) return { avgOe: 100, avgDe: 100 };
     return {
       avgOe:
         valid.reduce((sum, t) => sum + (t.adjOe ?? 0), 0) / valid.length,
@@ -287,9 +288,9 @@ export default function WarRoomChart({ teams }: Props) {
             />
 
             <Scatter data={filteredTeams} onClick={(d: { payload?: WarRoomTeam }) => { if (d?.payload) setSelectedTeam(d.payload); }}>
-              {filteredTeams.map((t, i) => (
+              {filteredTeams.map((t) => (
                 <Cell
-                  key={i}
+                  key={t.teamId}
                   fill={getConfColor(t.conference)}
                   r={getDotSize(t)}
                   opacity={getDotOpacity(t)}

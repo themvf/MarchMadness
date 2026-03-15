@@ -285,9 +285,9 @@ export default function ChalkChaosChart({ data }: Props) {
               cursor={{ fill: "rgba(148,163,184,0.1)" }}
             />
             <Bar dataKey="divergencePct" radius={[4, 4, 4, 4]} barSize={20}>
-              {roundData.map((d, i) => (
+              {roundData.map((d) => (
                 <Cell
-                  key={i}
+                  key={d.teamId}
                   fill={d.divergencePct >= 0 ? "#059669" : "#dc2626"}
                   opacity={0.8}
                 />

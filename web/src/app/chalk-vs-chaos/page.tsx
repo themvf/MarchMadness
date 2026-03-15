@@ -80,7 +80,7 @@ export default async function ChalkChaosPage() {
             <div className="rounded-lg border bg-card p-4">
               <h3 className="font-semibold mb-3 text-sm">Round Divergence</h3>
               <div className="space-y-2">
-                {[...roundSummary.entries()].map(([round, { count, avgDiv }]) => (
+                {["R64", "R32", "S16", "E8", "F4", "NCG", "Champion"].filter(r => roundSummary.has(r)).map((round) => { const { avgDiv } = roundSummary.get(round)!; return (
                   <div key={round} className="flex items-center gap-2 text-sm">
                     <span className="w-20 text-muted-foreground">{round}</span>
                     <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
@@ -93,7 +93,7 @@ export default async function ChalkChaosPage() {
                       {avgDiv.toFixed(1)}%
                     </span>
                   </div>
-                ))}
+                ); })}
               </div>
             </div>
           )}

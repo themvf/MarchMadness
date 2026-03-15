@@ -661,6 +661,12 @@ export async function getChalkChaosData(season = CURRENT_SEASON): Promise<ChalkC
       ON sr.team_id = pp.team_id
       AND sr.season = pp.season
       AND sr.round = pp.round
+      AND sr.model_version = (
+        SELECT model_version FROM simulation_results
+        WHERE season = pp.season
+        ORDER BY simulated_at DESC
+        LIMIT 1
+      )
     WHERE pp.season = ${season}
       AND pp.source = 'espn'
     ORDER BY abs(sr.advancement_pct - pp.pick_pct) DESC

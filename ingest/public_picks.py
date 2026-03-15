@@ -105,7 +105,11 @@ def show_picks(db: DatabaseManager, season: int) -> None:
         LEFT JOIN tournament_bracket tb
             ON tb.team_id = pp.team_id AND tb.season = pp.season
         WHERE pp.season = %s
-        ORDER BY pp.round, pp.pick_pct DESC
+        ORDER BY CASE pp.round
+            WHEN 'R64' THEN 1 WHEN 'R32' THEN 2 WHEN 'S16' THEN 3
+            WHEN 'E8' THEN 4 WHEN 'F4' THEN 5 WHEN 'NCG' THEN 6
+            WHEN 'Champion' THEN 7 ELSE 8 END,
+            pp.pick_pct DESC
         """,
         (season,),
     )

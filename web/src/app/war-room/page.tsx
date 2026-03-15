@@ -14,8 +14,8 @@ export default async function WarRoomPage() {
 
   // Tournament teams in the "elite" quadrant (above-avg offense AND defense)
   const valid = teams.filter((t) => t.adjOe != null && t.adjDe != null);
-  const avgOe = valid.reduce((s, t) => s + (t.adjOe ?? 0), 0) / valid.length;
-  const avgDe = valid.reduce((s, t) => s + (t.adjDe ?? 0), 0) / valid.length;
+  const avgOe = valid.length > 0 ? valid.reduce((s, t) => s + (t.adjOe ?? 0), 0) / valid.length : 100;
+  const avgDe = valid.length > 0 ? valid.reduce((s, t) => s + (t.adjDe ?? 0), 0) / valid.length : 100;
   const eliteTournament = teams
     .filter(
       (t) =>
@@ -74,7 +74,7 @@ export default async function WarRoomPage() {
                       #{t.seed}
                     </span>
                     <span className="text-xs font-mono text-muted-foreground">
-                      +{t.adjEm?.toFixed(1)}
+                      {(t.adjEm ?? 0) >= 0 ? "+" : ""}{t.adjEm?.toFixed(1)}
                     </span>
                   </div>
                 ))}
