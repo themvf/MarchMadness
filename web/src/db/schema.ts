@@ -234,6 +234,29 @@ export const bracketMatchups = pgTable(
   ]
 );
 
+export const publicPicks = pgTable(
+  "public_picks",
+  {
+    id: serial("id").primaryKey(),
+    season: integer("season").notNull(),
+    teamId: integer("team_id")
+      .notNull()
+      .references(() => teams.teamId),
+    round: text("round").notNull(),
+    pickPct: doublePrecision("pick_pct").notNull(),
+    source: text("source").default("espn"),
+    fetchedAt: timestamp("fetched_at").defaultNow(),
+  },
+  (t) => [
+    unique("public_picks_season_team_round_source_key").on(
+      t.season,
+      t.teamId,
+      t.round,
+      t.source
+    ),
+  ]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;
@@ -243,3 +266,4 @@ export type SimulationResult = typeof simulationResults.$inferSelect;
 export type PlayerStat = typeof playerStats.$inferSelect;
 export type TeamProfile = typeof teamProfiles.$inferSelect;
 export type BracketMatchup = typeof bracketMatchups.$inferSelect;
+export type PublicPick = typeof publicPicks.$inferSelect;

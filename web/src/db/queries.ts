@@ -1,5 +1,5 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups } from "./schema";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks } from "./schema";
 import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
@@ -621,6 +621,49 @@ export async function getWarRoomData(season = CURRENT_SEASON): Promise<WarRoomTe
       ON tb.team_id = tr.team_id AND tb.season = tr.season
     WHERE tr.season = ${season}
     ORDER BY tr.rank
+  `);
+  return result.rows;
+}
+
+// ── Chalk vs Chaos (Public Picks vs Model) ────────────────
+
+export type ChalkChaosRow = {
+  teamId: number;
+  name: string;
+  conference: string | null;
+  logoUrl: string | null;
+  seed: number;
+  region: string;
+  round: string;
+  pickPct: number;
+  modelPct: number;
+  divergence: number;
+};
+
+export async function getChalkChaosData(season = CURRENT_SEASON): Promise<ChalkChaosRow[]> {
+  const result = await db.execute<ChalkChaosRow>(sql`
+    SELECT
+      t.team_id as "teamId",
+      t.name,
+      t.conference,
+      t.logo_url as "logoUrl",
+      tb.seed,
+      tb.region,
+      pp.round,
+      pp.pick_pct as "pickPct",
+      sr.advancement_pct as "modelPct",
+      (sr.advancement_pct - pp.pick_pct) as "divergence"
+    FROM public_picks pp
+    INNER JOIN teams t ON t.team_id = pp.team_id
+    INNER JOIN tournament_bracket tb
+      ON tb.team_id = pp.team_id AND tb.season = pp.season
+    INNER JOIN simulation_results sr
+      ON sr.team_id = pp.team_id
+      AND sr.season = pp.season
+      AND sr.round = pp.round
+    WHERE pp.season = ${season}
+      AND pp.source = 'espn'
+    ORDER BY abs(sr.advancement_pct - pp.pick_pct) DESC
   `);
   return result.rows;
 }
