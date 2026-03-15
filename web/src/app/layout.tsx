@@ -31,6 +31,7 @@ function Nav() {
     { href: "/bracket", label: "Bracket" },
     { href: "/divergence", label: "Divergence" },
     { href: "/bracket-matchups", label: "Tournament" },
+    { href: "/war-room", label: "War Room" },
   ];
 
   return (

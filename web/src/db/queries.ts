@@ -578,3 +578,49 @@ export async function getBracketMatchups(
   `);
   return result.rows;
 }
+
+// ── War Room (Efficiency Scatter) ─────────────────────────
+
+export type WarRoomTeam = {
+  teamId: number;
+  name: string;
+  conference: string | null;
+  logoUrl: string | null;
+  rank: number | null;
+  adjOe: number | null;
+  adjDe: number | null;
+  adjEm: number | null;
+  barthag: number | null;
+  adjTempo: number | null;
+  wins: number | null;
+  losses: number | null;
+  seed: number | null;
+  region: string | null;
+};
+
+export async function getWarRoomData(season = CURRENT_SEASON): Promise<WarRoomTeam[]> {
+  const result = await db.execute<WarRoomTeam>(sql`
+    SELECT
+      t.team_id as "teamId",
+      t.name,
+      t.conference,
+      t.logo_url as "logoUrl",
+      tr.rank,
+      tr.adj_oe as "adjOe",
+      tr.adj_de as "adjDe",
+      tr.adj_em as "adjEm",
+      tr.barthag,
+      tr.adj_tempo as "adjTempo",
+      tr.wins,
+      tr.losses,
+      tb.seed,
+      tb.region
+    FROM torvik_ratings tr
+    INNER JOIN teams t ON t.team_id = tr.team_id
+    LEFT JOIN tournament_bracket tb
+      ON tb.team_id = tr.team_id AND tb.season = tr.season
+    WHERE tr.season = ${season}
+    ORDER BY tr.rank
+  `);
+  return result.rows;
+}
