@@ -31,6 +31,7 @@ function Nav() {
     { href: "/bracket", label: "Bracket" },
     { href: "/divergence", label: "Divergence" },
     { href: "/bracket-matchups", label: "Tournament" },
+    { href: "/bracket-builder", label: "Builder" },
     { href: "/war-room", label: "War Room" },
     { href: "/chalk-vs-chaos", label: "Chalk vs Chaos" },
   ];

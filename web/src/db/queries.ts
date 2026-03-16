@@ -673,3 +673,85 @@ export async function getChalkChaosData(season = CURRENT_SEASON): Promise<ChalkC
   `);
   return result.rows;
 }
+
+// ── Bracket Builder (composite) ──────────────────────────────
+
+export type BracketBuilderTeam = {
+  teamId: number;
+  name: string;
+  seed: number;
+  region: string;
+  conference: string | null;
+  logoUrl: string | null;
+  barthag: number | null;
+  adjOe: number | null;
+  adjDe: number | null;
+  adjEm: number | null;
+  adjTempo: number | null;
+  rank: number | null;
+  wins: number | null;
+  losses: number | null;
+};
+
+export type SimAdvancement = {
+  teamId: number;
+  round: string;
+  advancementPct: number;
+};
+
+export type TopPlayer = {
+  teamId: number;
+  name: string;
+  position: string | null;
+  ppg: number | null;
+  rpg: number | null;
+  apg: number | null;
+  efg: number | null;
+  usageRate: number | null;
+};
+
+export async function getBracketBuilderData(season = CURRENT_SEASON) {
+  // Tournament teams with ratings
+  const teamsResult = await db.execute<BracketBuilderTeam>(sql`
+    SELECT
+      t.team_id as "teamId", t.name, tb.seed, tb.region,
+      t.conference, t.logo_url as "logoUrl",
+      tr.barthag, tr.adj_oe as "adjOe", tr.adj_de as "adjDe",
+      tr.adj_em as "adjEm", tr.adj_tempo as "adjTempo",
+      tr.rank, tr.wins, tr.losses
+    FROM tournament_bracket tb
+    INNER JOIN teams t ON t.team_id = tb.team_id
+    LEFT JOIN torvik_ratings tr ON tr.team_id = tb.team_id AND tr.season = tb.season
+    WHERE tb.season = ${season}
+    ORDER BY tb.region, tb.seed
+  `);
+
+  // R64 matchups with model predictions (if generated)
+  const matchups = await getBracketMatchups(season, "R64");
+
+  // Simulation advancement probabilities
+  const simResult = await db.execute<SimAdvancement>(sql`
+    SELECT team_id as "teamId", round, advancement_pct as "advancementPct"
+    FROM simulation_results
+    WHERE season = ${season}
+    ORDER BY team_id, round
+  `);
+
+  // Top 3 players per tournament team (by minutes)
+  const playersResult = await db.execute<TopPlayer>(sql`
+    SELECT
+      ps.team_id as "teamId", ps.name, ps.position,
+      ps.ppg, ps.rpg, ps.apg, ps.efg, ps.usage_rate as "usageRate"
+    FROM player_stats ps
+    INNER JOIN tournament_bracket tb ON tb.team_id = ps.team_id AND tb.season = ps.season
+    WHERE ps.season = ${season} AND ps.min_pct >= 20
+    ORDER BY ps.team_id, ps.min_pct DESC
+  `);
+
+  return {
+    teams: teamsResult.rows,
+    matchups,
+    simResults: simResult.rows,
+    players: playersResult.rows,
+  };
+}
