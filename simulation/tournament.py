@@ -127,11 +127,12 @@ class TournamentSimulator:
         print(f"Pre-computed {len(probs)} pairwise probabilities")
         return probs
 
-    def _build_region_bracket(self, region: str) -> list[int]:
+    def _build_region_bracket(self, region: str) -> list[int | None]:
         """Get team IDs in bracket seed order for a region.
 
-        Returns a list of 16 team_ids ordered by bracket position:
+        Returns a list of 16 entries ordered by bracket position:
         [1-seed, 16-seed, 8-seed, 9-seed, 5-seed, 12-seed, ...]
+        Missing seeds (e.g. First Four pending) are None (opponent gets a bye).
         """
         region_teams = {
             t["seed"]: tid
@@ -139,13 +140,14 @@ class TournamentSimulator:
             if t["region"] == region
         }
 
-        bracket = []
+        bracket: list[int | None] = []
         for seed in SEED_ORDER:
             tid = region_teams.get(seed)
             if tid:
                 bracket.append(tid)
             else:
-                logger.warning(f"Missing {seed}-seed in {region}")
+                logger.warning(f"Missing {seed}-seed in {region} (bye)")
+                bracket.append(None)
 
         return bracket
 
@@ -187,11 +189,26 @@ class TournamentSimulator:
                     winners = []
                     for i in range(0, len(bracket), 2):
                         if i + 1 >= len(bracket):
-                            winners.append(bracket[i])
+                            if bracket[i] is not None:
+                                winners.append(bracket[i])
                             continue
 
                         team_a = bracket[i]
                         team_b = bracket[i + 1]
+
+                        # Handle byes (None = First Four pending)
+                        if team_a is None and team_b is None:
+                            winners.append(None)
+                            continue
+                        if team_a is None:
+                            winners.append(team_b)
+                            advancement[team_b][round_name] += 1
+                            continue
+                        if team_b is None:
+                            winners.append(team_a)
+                            advancement[team_a][round_name] += 1
+                            continue
+
                         p = probs.get((team_a, team_b), 0.5)
 
                         winner = team_a if rng.random() < p else team_b
@@ -201,7 +218,7 @@ class TournamentSimulator:
                     bracket = winners
 
                 # Region winner goes to Final Four
-                if bracket:
+                if bracket and bracket[0] is not None:
                     final_four.append(bracket[0])
                     advancement[bracket[0]]["F4"] += 1
 
@@ -319,3 +336,7 @@ if __name__ == "__main__":
         sim = TournamentSimulator(db, config.model.current_season)
         results = sim.simulate(n_simulations=config.model.n_simulations)
         sim.print_results(results)
+
+        # Store results to database
+        stored = sim.store_results(results, model_version="v1")
+        print(f"\nStored {stored} simulation results to database.")
