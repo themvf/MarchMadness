@@ -727,7 +727,7 @@ export async function getBracketBuilderData(season = CURRENT_SEASON) {
   `);
 
   // R64 matchups with model predictions (if generated)
-  const matchups = await getBracketMatchups(season, "R64");
+  const matchups = await getBracketMatchups(season);
 
   // Simulation advancement probabilities
   const simResult = await db.execute<SimAdvancement>(sql`
@@ -737,7 +737,7 @@ export async function getBracketBuilderData(season = CURRENT_SEASON) {
     ORDER BY team_id, round
   `);
 
-  // Top 3 players per tournament team (by minutes)
+  // Top players per tournament team (by minutes)
   const playersResult = await db.execute<TopPlayer>(sql`
     SELECT
       ps.team_id as "teamId", ps.name, ps.position,
@@ -748,10 +748,14 @@ export async function getBracketBuilderData(season = CURRENT_SEASON) {
     ORDER BY ps.team_id, ps.min_pct DESC
   `);
 
+  // Team profiles (for archetypes)
+  const profiles = await getTeamProfiles(season);
+
   return {
     teams: teamsResult.rows,
     matchups,
     simResults: simResult.rows,
     players: playersResult.rows,
+    profiles,
   };
 }

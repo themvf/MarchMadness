@@ -17,9 +17,10 @@ export default async function BracketBuilderPage() {
       </div>
       <BracketBuilderClient
         teams={data.teams}
-        r64Matchups={data.matchups}
+        matchups={data.matchups}
         simResults={data.simResults}
         players={data.players}
+        profiles={Array.from(data.profiles.values())}
       />
     </div>
   );

@@ -6,6 +6,7 @@ import type {
   BracketMatchupRow,
   SimAdvancement,
   TopPlayer,
+  TeamProfileRow,
 } from "@/db/queries";
 import {
   buildSlotMap,
@@ -49,9 +50,10 @@ function savePicks(picks: PickState) {
 
 interface Props {
   teams: BracketBuilderTeam[];
-  r64Matchups: BracketMatchupRow[];
+  matchups: BracketMatchupRow[];
   simResults: SimAdvancement[];
   players: TopPlayer[];
+  profiles: TeamProfileRow[];
 }
 
 // ── Matchup Slot Component ───────────────────────────────────
@@ -63,6 +65,7 @@ function MatchupSlot({
   winnerId,
   prob,
   modelProb,
+  championTeamIds,
   onPick,
   onDetail,
 }: {
@@ -72,6 +75,7 @@ function MatchupSlot({
   winnerId: number | null;
   prob: number | null;
   modelProb: number | null;
+  championTeamIds: Set<number>;
   onPick: (slotId: string, teamId: number) => void;
   onDetail: (slotId: string) => void;
 }) {
@@ -86,6 +90,7 @@ function MatchupSlot({
         isWinner={winnerId === teamA?.teamId}
         isLoser={winnerId != null && winnerId !== teamA?.teamId}
         canPick={bothPresent}
+        isChampionContender={teamA ? championTeamIds.has(teamA.teamId) : false}
         onClick={() => teamA && onPick(slotDef.id, teamA.teamId)}
       />
 
@@ -122,6 +127,7 @@ function MatchupSlot({
         isWinner={winnerId === teamB?.teamId}
         isLoser={winnerId != null && winnerId !== teamB?.teamId}
         canPick={bothPresent}
+        isChampionContender={teamB ? championTeamIds.has(teamB.teamId) : false}
         onClick={() => teamB && onPick(slotDef.id, teamB.teamId)}
       />
     </div>
@@ -133,12 +139,14 @@ function TeamRow({
   isWinner,
   isLoser,
   canPick,
+  isChampionContender,
   onClick,
 }: {
   team: BracketTeam | undefined;
   isWinner: boolean;
   isLoser: boolean;
   canPick: boolean;
+  isChampionContender: boolean;
   onClick: () => void;
 }) {
   if (!team) {
@@ -159,6 +167,14 @@ function TeamRow({
         isLoser ? "opacity-40" : ""
       }`}
     >
+      {isChampionContender && !isLoser && (
+        <span
+          className="text-amber-500 text-[9px] shrink-0"
+          title="Championship contender"
+        >
+          &#9733;
+        </span>
+      )}
       <span className="w-4 text-right font-mono text-[10px] text-muted-foreground shrink-0">
         {team.seed}
       </span>
@@ -187,6 +203,7 @@ function RegionBracket({
   teamMap,
   picks,
   r64ModelProbs,
+  championTeamIds,
   onPick,
   onDetail,
   mirrored,
@@ -196,6 +213,7 @@ function RegionBracket({
   teamMap: Map<number, BracketTeam>;
   picks: PickState;
   r64ModelProbs: Map<string, number>;
+  championTeamIds: Set<number>;
   onPick: (slotId: string, teamId: number) => void;
   onDetail: (slotId: string) => void;
   mirrored?: boolean;
@@ -226,7 +244,6 @@ function RegionBracket({
       >
         {columns.map((round) => {
           const slotsForRound = roundSlots[round];
-          // Spacing increases per round to create bracket tree effect
           const gapMap: Record<string, string> = {
             R64: "gap-y-0.5",
             R32: "gap-y-6",
@@ -259,6 +276,7 @@ function RegionBracket({
                     winnerId={picks[def.id] ?? null}
                     prob={prob}
                     modelProb={modelProb}
+                    championTeamIds={championTeamIds}
                     onPick={onPick}
                     onDetail={onDetail}
                   />
@@ -278,12 +296,14 @@ function FinalFourPanel({
   slots,
   teamMap,
   picks,
+  championTeamIds,
   onPick,
   onDetail,
 }: {
   slots: Map<string, SlotDef>;
   teamMap: Map<number, BracketTeam>;
   picks: PickState;
+  championTeamIds: Set<number>;
   onPick: (slotId: string, teamId: number) => void;
   onDetail: (slotId: string) => void;
 }) {
@@ -321,6 +341,7 @@ function FinalFourPanel({
                 winnerId={picks[def.id] ?? null}
                 prob={prob}
                 modelProb={null}
+                championTeamIds={championTeamIds}
                 onPick={onPick}
                 onDetail={onDetail}
               />
@@ -352,6 +373,7 @@ function FinalFourPanel({
                 winnerId={picks[ncgSlot.id] ?? null}
                 prob={prob}
                 modelProb={null}
+                championTeamIds={championTeamIds}
                 onPick={onPick}
                 onDetail={onDetail}
               />
@@ -384,9 +406,10 @@ function FinalFourPanel({
 
 export default function BracketBuilderClient({
   teams,
-  r64Matchups,
+  matchups,
   simResults,
   players,
+  profiles,
 }: Props) {
   const [picks, setPicks] = useState<PickState>({});
   const [detailSlotId, setDetailSlotId] = useState<string | null>(null);
@@ -417,7 +440,7 @@ export default function BracketBuilderClient({
   // Build R64 model probability map (slotId -> probA)
   const r64ModelProbs = useMemo(() => {
     const m = new Map<string, number>();
-    for (const matchup of r64Matchups) {
+    for (const matchup of matchups) {
       if (matchup.modelProbA == null) continue;
       for (const [slotId, def] of slots) {
         if (def.round !== "R64") continue;
@@ -439,7 +462,36 @@ export default function BracketBuilderClient({
       }
     }
     return m;
-  }, [r64Matchups, slots]);
+  }, [matchups, slots]);
+
+  // Build matchup lookup by team pair (for Vegas/model data in any round)
+  const matchupLookup = useMemo(() => {
+    const m = new Map<string, BracketMatchupRow>();
+    for (const mu of matchups) {
+      // Store under canonical key (smaller id first)
+      const key = `${Math.min(mu.teamAId, mu.teamBId)}-${Math.max(mu.teamAId, mu.teamBId)}`;
+      m.set(key, mu);
+    }
+    return m;
+  }, [matchups]);
+
+  // Championship contenders from simulation data (≥3% champion probability)
+  const championTeamIds = useMemo(() => {
+    const s = new Set<number>();
+    for (const sim of simResults) {
+      if (sim.round === "Champion" && sim.advancementPct >= 0.03) {
+        s.add(sim.teamId);
+      }
+    }
+    return s;
+  }, [simResults]);
+
+  // Profile map: teamId → TeamProfileRow
+  const profileMap = useMemo(() => {
+    const m = new Map<number, TeamProfileRow>();
+    for (const p of profiles) m.set(p.teamId, p);
+    return m;
+  }, [profiles]);
 
   // Build sim results lookup: teamId -> { round -> pct }
   const simMap = useMemo(() => {
@@ -553,19 +605,41 @@ export default function BracketBuilderClient({
     const teamB = teamBId ? teamMap.get(teamBId) : undefined;
     if (!teamA || !teamB) return null;
 
+    // Look up matchup data (Vegas, model) for this team pair
+    const lookupKey = `${Math.min(teamA.teamId, teamB.teamId)}-${Math.max(teamA.teamId, teamB.teamId)}`;
+    const matchup = matchupLookup.get(lookupKey);
+    const isReversed = matchup ? matchup.teamAId !== teamA.teamId : false;
+
     return {
       slotId: detailSlotId,
       slotDef: slots.get(detailSlotId)!,
       teamA,
       teamB,
       prob: computeProb(teamA, teamB),
-      modelProb: r64ModelProbs.get(detailSlotId) ?? null,
+      modelProb: matchup?.modelProbA != null
+        ? (isReversed ? 1 - matchup.modelProbA : matchup.modelProbA)
+        : (r64ModelProbs.get(detailSlotId) ?? null),
+      vegasProb: matchup?.vegasProbA != null
+        ? (isReversed ? 1 - matchup.vegasProbA : matchup.vegasProbA)
+        : null,
+      vegasSpread: matchup?.vegasSpreadA != null
+        ? (isReversed ? -(matchup.vegasSpreadA) : matchup.vegasSpreadA)
+        : null,
+      vegasTotal: matchup?.vegasTotal ?? null,
+      vegasMlA: matchup
+        ? (isReversed ? matchup.vegasMlB : matchup.vegasMlA)
+        : null,
+      vegasMlB: matchup
+        ? (isReversed ? matchup.vegasMlA : matchup.vegasMlB)
+        : null,
+      profileA: profileMap.get(teamA.teamId),
+      profileB: profileMap.get(teamB.teamId),
       playersA: playerMap.get(teamA.teamId) ?? [],
       playersB: playerMap.get(teamB.teamId) ?? [],
       simA: simMap.get(teamA.teamId) ?? new Map(),
       simB: simMap.get(teamB.teamId) ?? new Map(),
     };
-  }, [detailSlotId, slots, picks, teamMap, r64ModelProbs, playerMap, simMap]);
+  }, [detailSlotId, slots, picks, teamMap, r64ModelProbs, matchupLookup, profileMap, playerMap, simMap]);
 
   if (!loaded) return null;
 
@@ -634,6 +708,7 @@ export default function BracketBuilderClient({
               teamMap={teamMap}
               picks={picks}
               r64ModelProbs={r64ModelProbs}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -643,6 +718,7 @@ export default function BracketBuilderClient({
               slots={slots}
               teamMap={teamMap}
               picks={picks}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -654,6 +730,7 @@ export default function BracketBuilderClient({
               teamMap={teamMap}
               picks={picks}
               r64ModelProbs={r64ModelProbs}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
               mirrored
@@ -668,6 +745,7 @@ export default function BracketBuilderClient({
               teamMap={teamMap}
               picks={picks}
               r64ModelProbs={r64ModelProbs}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -680,6 +758,7 @@ export default function BracketBuilderClient({
               teamMap={teamMap}
               picks={picks}
               r64ModelProbs={r64ModelProbs}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
               mirrored
@@ -699,6 +778,7 @@ export default function BracketBuilderClient({
               teamMap={teamMap}
               picks={picks}
               r64ModelProbs={r64ModelProbs}
+              championTeamIds={championTeamIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -708,6 +788,7 @@ export default function BracketBuilderClient({
             slots={slots}
             teamMap={teamMap}
             picks={picks}
+            championTeamIds={championTeamIds}
             onPick={handlePick}
             onDetail={handleDetail}
           />
@@ -718,6 +799,7 @@ export default function BracketBuilderClient({
             teamMap={teamMap}
             picks={picks}
             r64ModelProbs={r64ModelProbs}
+            championTeamIds={championTeamIds}
             onPick={handlePick}
             onDetail={handleDetail}
           />

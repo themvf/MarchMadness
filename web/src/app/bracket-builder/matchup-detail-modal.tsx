@@ -1,8 +1,9 @@
 "use client";
 
 import { ROUNDS, ROUND_LABELS, type BracketTeam } from "@/lib/bracket-logic";
-import type { TopPlayer, SimAdvancement } from "@/db/queries";
+import type { TopPlayer, SimAdvancement, TeamProfileRow } from "@/db/queries";
 import type { SlotDef } from "@/lib/bracket-logic";
+import { getArchetypes, archetypeBadgeClass } from "@/lib/archetypes";
 
 interface Props {
   slotId: string;
@@ -11,6 +12,13 @@ interface Props {
   teamB: BracketTeam;
   prob: number | null;
   modelProb: number | null;
+  vegasProb: number | null;
+  vegasSpread: number | null;
+  vegasTotal: number | null;
+  vegasMlA: number | null;
+  vegasMlB: number | null;
+  profileA: TeamProfileRow | undefined;
+  profileB: TeamProfileRow | undefined;
   playersA: TopPlayer[];
   playersB: TopPlayer[];
   simA: Map<string, number>;
@@ -19,6 +27,74 @@ interface Props {
   onPick: (teamId: number) => void;
   onClose: () => void;
 }
+
+// ── Projected score from team efficiency stats ────────────────
+
+function computeProjectedScores(
+  teamA: BracketTeam,
+  teamB: BracketTeam
+): { scoreA: number; scoreB: number } | null {
+  if (
+    teamA.adjOe == null || teamA.adjDe == null || teamA.adjTempo == null ||
+    teamB.adjOe == null || teamB.adjDe == null || teamB.adjTempo == null
+  ) {
+    return null;
+  }
+  const poss = (teamA.adjTempo + teamB.adjTempo) / 2;
+  // Kenpom-style additive: average of offense and opponent's defense, then scale by pace
+  const scoreA = poss * ((teamA.adjOe + teamB.adjDe) / 2) / 100;
+  const scoreB = poss * ((teamB.adjOe + teamA.adjDe) / 2) / 100;
+  return { scoreA, scoreB };
+}
+
+function vegasProjectedScores(
+  spread: number | null,
+  total: number | null
+): { scoreA: number; scoreB: number } | null {
+  if (spread == null || total == null) return null;
+  // spread < 0 means team A is favored
+  const scoreA = (total - spread) / 2;
+  const scoreB = (total + spread) / 2;
+  return { scoreA, scoreB };
+}
+
+// ── Probability bar component ─────────────────────────────────
+
+function ProbBar({
+  label,
+  probA,
+  colorA,
+  colorB,
+}: {
+  label: string;
+  probA: number;
+  colorA: string;
+  colorB: string;
+}) {
+  const pctA = Math.round(probA * 100);
+  const pctB = 100 - pctA;
+  return (
+    <div>
+      <div className="text-[10px] text-muted-foreground mb-0.5">{label}</div>
+      <div className="flex h-6 w-full overflow-hidden rounded-full bg-muted text-xs font-bold">
+        <div
+          className={`flex items-center justify-center text-white ${colorA}`}
+          style={{ width: `${pctA}%` }}
+        >
+          {pctA > 15 && `${pctA}%`}
+        </div>
+        <div
+          className={`flex items-center justify-center text-white ${colorB}`}
+          style={{ width: `${pctB}%` }}
+        >
+          {pctB > 15 && `${pctB}%`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Stat comparison row ───────────────────────────────────────
 
 function StatRow({
   label,
@@ -59,6 +135,8 @@ function StatRow({
     </div>
   );
 }
+
+// ── Player table ──────────────────────────────────────────────
 
 function PlayerTable({
   players,
@@ -106,12 +184,28 @@ function PlayerTable({
   );
 }
 
+// ── Moneyline formatting ──────────────────────────────────────
+
+function formatMl(ml: number | null): string {
+  if (ml == null) return "---";
+  return ml > 0 ? `+${ml}` : `${ml}`;
+}
+
+// ── Main Modal ────────────────────────────────────────────────
+
 export default function MatchupDetailModal({
   slotDef,
   teamA,
   teamB,
   prob,
   modelProb,
+  vegasProb,
+  vegasSpread,
+  vegasTotal,
+  vegasMlA,
+  vegasMlB,
+  profileA,
+  profileB,
   playersA,
   playersB,
   simA,
@@ -120,8 +214,12 @@ export default function MatchupDetailModal({
   onPick,
   onClose,
 }: Props) {
-  const displayProb = modelProb ?? prob;
   const roundLabel = ROUND_LABELS[slotDef.round] ?? slotDef.round;
+  const archetypesA = getArchetypes(profileA);
+  const archetypesB = getArchetypes(profileB);
+  const modelScores = computeProjectedScores(teamA, teamB);
+  const vegasScores = vegasProjectedScores(vegasSpread, vegasTotal);
+  const hasAnyProb = modelProb != null || prob != null || vegasProb != null;
 
   return (
     <div
@@ -154,7 +252,7 @@ export default function MatchupDetailModal({
         </div>
 
         <div className="px-5 py-4 space-y-5">
-          {/* Team headers + Probability */}
+          {/* Team headers */}
           <div className="text-center space-y-3">
             <div className="flex items-center justify-center gap-4">
               <div className="flex items-center gap-2">
@@ -197,63 +295,159 @@ export default function MatchupDetailModal({
                 )}
               </div>
             </div>
+          </div>
 
-            {/* Probability bars */}
-            {displayProb != null && (
-              <div className="space-y-1.5">
-                {modelProb != null && (
-                  <div>
-                    <div className="text-[10px] text-muted-foreground mb-0.5">
-                      XGBoost Model
+          {/* Archetypes (Team DNA) */}
+          {(archetypesA.length > 0 || archetypesB.length > 0) && (
+            <div className="rounded-lg border p-3">
+              <h4 className="text-xs font-semibold text-muted-foreground mb-2 text-center">
+                Team DNA
+              </h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[10px] font-medium text-blue-600 mb-1 flex items-center gap-1">
+                    {teamA.logoUrl && (
+                      <img src={teamA.logoUrl} alt="" className="h-3 w-3 object-contain" />
+                    )}
+                    {teamA.name}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {archetypesA.map((a) => (
+                      <span
+                        key={a.label}
+                        title={a.tip}
+                        className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${archetypeBadgeClass(a.kind)}`}
+                      >
+                        {a.label}
+                      </span>
+                    ))}
+                    {archetypesA.length === 0 && (
+                      <span className="text-[10px] text-muted-foreground italic">No archetypes</span>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-medium text-red-500 mb-1 flex items-center gap-1">
+                    {teamB.logoUrl && (
+                      <img src={teamB.logoUrl} alt="" className="h-3 w-3 object-contain" />
+                    )}
+                    {teamB.name}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {archetypesB.map((a) => (
+                      <span
+                        key={a.label}
+                        title={a.tip}
+                        className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${archetypeBadgeClass(a.kind)}`}
+                      >
+                        {a.label}
+                      </span>
+                    ))}
+                    {archetypesB.length === 0 && (
+                      <span className="text-[10px] text-muted-foreground italic">No archetypes</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Model Comparison — All 3 probability models */}
+          {hasAnyProb && (
+            <div className="space-y-1.5">
+              <h4 className="text-xs font-semibold text-muted-foreground text-center">
+                Win Probability
+              </h4>
+              {modelProb != null && (
+                <ProbBar
+                  label="XGBoost Model"
+                  probA={modelProb}
+                  colorA="bg-blue-500"
+                  colorB="bg-red-400"
+                />
+              )}
+              {prob != null && (
+                <ProbBar
+                  label="Log5 (Barthag)"
+                  probA={prob}
+                  colorA="bg-blue-400"
+                  colorB="bg-red-300"
+                />
+              )}
+              {vegasProb != null && (
+                <ProbBar
+                  label="Vegas Implied"
+                  probA={vegasProb}
+                  colorA="bg-emerald-500"
+                  colorB="bg-orange-400"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Projected Score & Vegas Lines */}
+          {(modelScores || vegasScores || vegasMlA != null) && (
+            <div className="rounded-lg border p-3">
+              <h4 className="text-xs font-semibold text-muted-foreground mb-2 text-center">
+                Projected Score
+              </h4>
+              <div className="space-y-2">
+                {modelScores && (
+                  <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center">
+                    <div className="text-right font-mono text-sm font-bold text-blue-600">
+                      {modelScores.scoreA.toFixed(1)}
                     </div>
-                    <div className="flex h-6 w-full overflow-hidden rounded-full bg-muted text-xs font-bold">
-                      <div
-                        className="flex items-center justify-center bg-blue-500 text-white"
-                        style={{
-                          width: `${Math.round(modelProb * 100)}%`,
-                        }}
-                      >
-                        {Math.round(modelProb * 100)}%
-                      </div>
-                      <div
-                        className="flex items-center justify-center bg-red-400 text-white"
-                        style={{
-                          width: `${Math.round((1 - modelProb) * 100)}%`,
-                        }}
-                      >
-                        {Math.round((1 - modelProb) * 100)}%
-                      </div>
+                    <div className="text-[10px] text-muted-foreground text-center w-14">
+                      Model
+                    </div>
+                    <div className="text-left font-mono text-sm font-bold text-red-500">
+                      {modelScores.scoreB.toFixed(1)}
                     </div>
                   </div>
                 )}
-                {prob != null && (
-                  <div>
-                    <div className="text-[10px] text-muted-foreground mb-0.5">
-                      {modelProb != null ? "Log5 (Barthag)" : "Win Probability (Log5)"}
+                {vegasScores && (
+                  <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center">
+                    <div className="text-right font-mono text-sm font-bold text-blue-600">
+                      {vegasScores.scoreA.toFixed(1)}
                     </div>
-                    <div className="flex h-6 w-full overflow-hidden rounded-full bg-muted text-xs font-bold">
-                      <div
-                        className="flex items-center justify-center bg-blue-400 text-white"
-                        style={{
-                          width: `${Math.round(prob * 100)}%`,
-                        }}
-                      >
-                        {Math.round(prob * 100)}%
-                      </div>
-                      <div
-                        className="flex items-center justify-center bg-red-300 text-white"
-                        style={{
-                          width: `${Math.round((1 - prob) * 100)}%`,
-                        }}
-                      >
-                        {Math.round((1 - prob) * 100)}%
-                      </div>
+                    <div className="text-[10px] text-muted-foreground text-center w-14">
+                      Vegas
                     </div>
+                    <div className="text-left font-mono text-sm font-bold text-red-500">
+                      {vegasScores.scoreB.toFixed(1)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Vegas line details */}
+                {(vegasSpread != null || vegasTotal != null || vegasMlA != null) && (
+                  <div className="border-t pt-2 mt-1 flex flex-wrap justify-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    {vegasSpread != null && (
+                      <span>
+                        Spread: <span className="font-mono font-medium text-foreground">
+                          {vegasSpread === 0 ? "PK" : `${teamA.name} ${vegasSpread > 0 ? "+" : ""}${vegasSpread.toFixed(1)}`}
+                        </span>
+                      </span>
+                    )}
+                    {vegasTotal != null && (
+                      <span>
+                        O/U: <span className="font-mono font-medium text-foreground">
+                          {vegasTotal.toFixed(1)}
+                        </span>
+                      </span>
+                    )}
+                    {vegasMlA != null && vegasMlB != null && (
+                      <span>
+                        ML: <span className="font-mono font-medium text-blue-600">{formatMl(vegasMlA)}</span>
+                        {" / "}
+                        <span className="font-mono font-medium text-red-500">{formatMl(vegasMlB)}</span>
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Stats Comparison */}
           <div className="rounded-lg border p-3">
