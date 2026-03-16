@@ -56,7 +56,8 @@ export const ROUND_LABELS: Record<string, string> = {
   S16: "Sweet 16",
   E8: "Elite 8",
   F4: "Final Four",
-  NCG: "Championship",
+  NCG: "Title Game",
+  Champion: "Champion",
 };
 
 // ── Slot ID helpers ──────────────────────────────────────────
@@ -253,7 +254,7 @@ export function computeProb(
   teamA: BracketTeam | undefined,
   teamB: BracketTeam | undefined
 ): number | null {
-  if (!teamA?.barthag || !teamB?.barthag) return null;
+  if (teamA?.barthag == null || teamB?.barthag == null) return null;
   return log5(teamA.barthag, teamB.barthag);
 }
 

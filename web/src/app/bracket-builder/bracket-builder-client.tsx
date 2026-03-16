@@ -12,6 +12,7 @@ import {
   resolveSlotTeams,
   computeProb,
   clearDownstreamPicks,
+  getDownstreamSlots as getDownstream,
   countPicks,
   TOTAL_GAMES,
   REGIONS,
@@ -418,14 +419,21 @@ export default function BracketBuilderClient({
     const m = new Map<string, number>();
     for (const matchup of r64Matchups) {
       if (matchup.modelProbA == null) continue;
-      // Find the matching R64 slot by team IDs
       for (const [slotId, def] of slots) {
         if (def.round !== "R64") continue;
+        // Match by team IDs (check both orderings)
         if (
           def.presetTeamAId === matchup.teamAId &&
           def.presetTeamBId === matchup.teamBId
         ) {
           m.set(slotId, matchup.modelProbA!);
+          break;
+        }
+        if (
+          def.presetTeamAId === matchup.teamBId &&
+          def.presetTeamBId === matchup.teamAId
+        ) {
+          m.set(slotId, 1 - matchup.modelProbA!);
           break;
         }
       }
@@ -465,8 +473,8 @@ export default function BracketBuilderClient({
         if (prev[slotId] === teamId) {
           const next = { ...prev };
           delete next[slotId];
-          // Clear downstream that depended on this pick
-          const downstream = getDownstreamSlots(slotId);
+          // Clear all downstream slots
+          const downstream = getDownstream(slotId, slots);
           for (const dsId of downstream) {
             delete next[dsId];
           }
@@ -489,18 +497,6 @@ export default function BracketBuilderClient({
     },
     [slots]
   );
-
-  // Helper to get downstream slots (extracted for unpick)
-  function getDownstreamSlots(slotId: string): string[] {
-    const result: string[] = [];
-    for (const [id, def] of slots) {
-      if (def.feederA === slotId || def.feederB === slotId) {
-        result.push(id);
-        result.push(...getDownstreamSlots(id));
-      }
-    }
-    return result;
-  }
 
   const handleDetail = useCallback((slotId: string) => {
     setDetailSlotId(slotId);

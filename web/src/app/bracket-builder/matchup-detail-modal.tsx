@@ -31,10 +31,11 @@ function StatRow({
   valB: number | null;
   higherIsBetter?: boolean;
 }) {
+  const bothPresent = valA != null && valB != null;
   const a = valA ?? 0;
   const b = valB ?? 0;
-  const aWins = higherIsBetter ? a > b : a < b;
-  const bWins = higherIsBetter ? b > a : b < a;
+  const aWins = bothPresent && (higherIsBetter ? a > b : a < b);
+  const bWins = bothPresent && (higherIsBetter ? b > a : b < a);
 
   return (
     <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center py-0.5">
