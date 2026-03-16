@@ -20,6 +20,7 @@ import {
   ROUNDS,
   ROUND_LABELS,
   FF_PAIRINGS,
+  SEED_ORDER,
   type BracketTeam,
   type PickState,
   type SlotDef,
@@ -185,7 +186,9 @@ function TeamRow({
           className="h-4 w-4 object-contain shrink-0"
         />
       )}
-      <span className="truncate text-[11px]">{team.name}</span>
+      <span className={`truncate text-[11px] ${team.teamId < 0 ? "italic text-muted-foreground" : ""}`}>
+        {team.teamId < 0 ? "TBD (First Four)" : team.name}
+      </span>
       {isWinner && (
         <span className="ml-auto text-emerald-600 text-[10px] shrink-0">
           &#10003;
@@ -427,15 +430,57 @@ export default function BracketBuilderClient({
     if (loaded) savePicks(picks);
   }, [picks, loaded]);
 
+  // Inject placeholder teams for missing First Four seeds so 1-seeds can advance
+  const teamsWithPlaceholders = useMemo(() => {
+    const all: BracketBuilderTeam[] = [...teams];
+    const regionSeeds = new Map<string, Set<number>>();
+    for (const t of teams) {
+      if (!regionSeeds.has(t.region)) regionSeeds.set(t.region, new Set());
+      regionSeeds.get(t.region)!.add(t.seed);
+    }
+
+    let placeholderId = -1;
+    for (const region of REGIONS) {
+      const seeds = regionSeeds.get(region) ?? new Set();
+      for (let i = 0; i < SEED_ORDER.length; i += 2) {
+        const seedA = SEED_ORDER[i];
+        const seedB = SEED_ORDER[i + 1];
+        // If one team exists but opponent doesn't, create a TBD placeholder
+        for (const missingSeed of [seedA, seedB]) {
+          const otherSeed = missingSeed === seedA ? seedB : seedA;
+          if (!seeds.has(missingSeed) && seeds.has(otherSeed)) {
+            all.push({
+              teamId: placeholderId--,
+              name: "TBD",
+              seed: missingSeed,
+              region,
+              conference: null,
+              logoUrl: null,
+              barthag: null,
+              adjOe: null,
+              adjDe: null,
+              adjEm: null,
+              adjTempo: null,
+              rank: null,
+              wins: null,
+              losses: null,
+            });
+          }
+        }
+      }
+    }
+    return all;
+  }, [teams]);
+
   // Build team lookup map
   const teamMap = useMemo(() => {
     const m = new Map<number, BracketTeam>();
-    for (const t of teams) m.set(t.teamId, t);
+    for (const t of teamsWithPlaceholders) m.set(t.teamId, t);
     return m;
-  }, [teams]);
+  }, [teamsWithPlaceholders]);
 
   // Build slot map
-  const slots = useMemo(() => buildSlotMap(teams), [teams]);
+  const slots = useMemo(() => buildSlotMap(teamsWithPlaceholders), [teamsWithPlaceholders]);
 
   // Build R64 model probability map (slotId -> probA)
   const r64ModelProbs = useMemo(() => {
