@@ -3,7 +3,9 @@ export const dynamic = "force-dynamic";
 import {
   getGamesWithOdds,
   getTeamProfiles,
+  getBracketMatchups,
   type DivergenceRow,
+  type BracketMatchupRow,
 } from "@/db/queries";
 import {
   Card,
@@ -41,10 +43,25 @@ type AnalyzedGame = Omit<DivergenceRow, "vegasProb"> & {
 };
 
 export default async function DivergencePage() {
-  const [rows, profiles] = await Promise.all([
+  const [rows, profiles, bracketMatchups] = await Promise.all([
     getGamesWithOdds(),
     getTeamProfiles(),
+    getBracketMatchups(),
   ]);
+
+  // Upcoming tournament matchups with both model + Vegas data
+  const upcomingMatchups = bracketMatchups
+    .filter(
+      (m) =>
+        m.winnerId == null &&
+        m.modelProbA != null &&
+        m.vegasProbA != null
+    )
+    .map((m) => ({
+      ...m,
+      divergence: m.modelProbA! - m.vegasProbA!,
+    }))
+    .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
 
   if (rows.length === 0) {
     return (
@@ -182,6 +199,128 @@ export default async function DivergencePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Upcoming Tournament Divergences */}
+      {upcomingMatchups.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Upcoming Tournament: Model vs Vegas</CardTitle>
+            <CardDescription>
+              Where our XGBoost model disagrees with Vegas on upcoming matchups
+              ({upcomingMatchups.length} games with odds)
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Round</TableHead>
+                    <TableHead>Matchup</TableHead>
+                    <TableHead className="text-right">Our Model</TableHead>
+                    <TableHead className="text-right">Vegas</TableHead>
+                    <TableHead className="text-right">Gap</TableHead>
+                    <TableHead>Edge</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {upcomingMatchups.map((m) => {
+                    const modelFavorsA = m.modelProbA! > 0.5;
+                    const vegasFavorsA = m.vegasProbA! > 0.5;
+                    const disagree = modelFavorsA !== vegasFavorsA;
+                    const absGap = Math.abs(m.divergence);
+                    // Who does our model like more than Vegas does?
+                    const modelLikesA = m.divergence > 0;
+                    const edgeTeam = modelLikesA ? m.teamAName : m.teamBName;
+                    const edgeLogo = modelLikesA ? m.teamALogo : m.teamBLogo;
+
+                    return (
+                      <TableRow
+                        key={m.id}
+                        className={
+                          disagree
+                            ? "bg-yellow-500/5"
+                            : absGap > 0.1
+                              ? "bg-blue-500/5"
+                              : ""
+                        }
+                      >
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {m.round}
+                          {m.region ? ` · ${m.region}` : ""}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5">
+                            {m.teamALogo && (
+                              <img src={m.teamALogo} alt="" className="h-5 w-5 object-contain" />
+                            )}
+                            <span className={modelFavorsA ? "font-bold" : "text-muted-foreground"}>
+                              #{m.seedA} {m.teamAName}
+                            </span>
+                            <span className="mx-1 text-muted-foreground text-xs">vs</span>
+                            {m.teamBLogo && (
+                              <img src={m.teamBLogo} alt="" className="h-5 w-5 object-contain" />
+                            )}
+                            <span className={!modelFavorsA ? "font-bold" : "text-muted-foreground"}>
+                              #{m.seedB} {m.teamBName}
+                            </span>
+                            <ArchetypeBadges profile={profiles.get(modelFavorsA ? m.teamAId : m.teamBId)} max={1} />
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          <span className={modelFavorsA ? "text-blue-600 font-bold" : ""}>
+                            {(m.modelProbA! * 100).toFixed(0)}%
+                          </span>
+                          <span className="text-muted-foreground"> / </span>
+                          <span className={!modelFavorsA ? "text-blue-600 font-bold" : ""}>
+                            {((1 - m.modelProbA!) * 100).toFixed(0)}%
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          <span className={vegasFavorsA ? "text-emerald-600 font-bold" : ""}>
+                            {(m.vegasProbA! * 100).toFixed(0)}%
+                          </span>
+                          <span className="text-muted-foreground"> / </span>
+                          <span className={!vegasFavorsA ? "text-emerald-600 font-bold" : ""}>
+                            {((1 - m.vegasProbA!) * 100).toFixed(0)}%
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span
+                            className={`font-mono text-sm font-bold ${
+                              absGap > 0.15
+                                ? "text-yellow-600"
+                                : absGap > 0.08
+                                  ? "text-orange-500"
+                                  : "text-muted-foreground"
+                            }`}
+                          >
+                            {(absGap * 100).toFixed(0)}%
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          {absGap > 0.05 ? (
+                            <div className="flex items-center gap-1">
+                              {edgeLogo && (
+                                <img src={edgeLogo} alt="" className="h-4 w-4 object-contain" />
+                              )}
+                              <span className={`text-xs font-medium ${disagree ? "text-yellow-700 dark:text-yellow-400" : "text-blue-600"}`}>
+                                {disagree ? "DISAGREE" : `Model likes ${edgeTeam}`}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">aligned</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Accuracy Breakdown */}
       <Card>
