@@ -28,11 +28,28 @@ interface Props {
   onClose: () => void;
 }
 
-// ── Projected score from team efficiency stats ────────────────
+// ── Probit: convert win probability → expected point margin ───
+
+function probToMargin(prob: number): number {
+  // Abramowitz & Stegun rational approximation of the normal quantile
+  // Multiply by ~11 (college basketball outcome standard deviation)
+  const p = Math.max(0.01, Math.min(0.99, prob));
+  const sign = p >= 0.5 ? 1 : -1;
+  const q = sign === 1 ? p : 1 - p;
+  const t = Math.sqrt(-2 * Math.log(1 - q));
+  const z =
+    t -
+    (2.515517 + 0.802853 * t + 0.010328 * t * t) /
+      (1 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+  return sign * z * 11;
+}
+
+// ── Projected score from efficiency stats + win probability ──
 
 function computeProjectedScores(
   teamA: BracketTeam,
-  teamB: BracketTeam
+  teamB: BracketTeam,
+  displayProb: number | null
 ): { scoreA: number; scoreB: number } | null {
   if (
     teamA.adjOe == null || teamA.adjDe == null || teamA.adjTempo == null ||
@@ -41,9 +58,15 @@ function computeProjectedScores(
     return null;
   }
   const poss = (teamA.adjTempo + teamB.adjTempo) / 2;
-  // Kenpom-style additive: average of offense and opponent's defense, then scale by pace
-  const scoreA = poss * ((teamA.adjOe + teamB.adjDe) / 2) / 100;
-  const scoreB = poss * ((teamB.adjOe + teamA.adjDe) / 2) / 100;
+  // Projected total from efficiency averages
+  const rawA = poss * ((teamA.adjOe + teamB.adjDe) / 2) / 100;
+  const rawB = poss * ((teamB.adjOe + teamA.adjDe) / 2) / 100;
+  const total = rawA + rawB;
+
+  // Derive margin from win probability so scores are consistent with the displayed %
+  const margin = displayProb != null ? probToMargin(displayProb) : rawA - rawB;
+  const scoreA = (total + margin) / 2;
+  const scoreB = (total - margin) / 2;
   return { scoreA, scoreB };
 }
 
@@ -217,7 +240,8 @@ export default function MatchupDetailModal({
   const roundLabel = ROUND_LABELS[slotDef.round] ?? slotDef.round;
   const archetypesA = getArchetypes(profileA);
   const archetypesB = getArchetypes(profileB);
-  const modelScores = computeProjectedScores(teamA, teamB);
+  const displayProb = modelProb ?? prob;
+  const modelScores = computeProjectedScores(teamA, teamB, displayProb);
   const vegasScores = vegasProjectedScores(vegasSpread, vegasTotal);
   const hasAnyProb = modelProb != null || prob != null || vegasProb != null;
 
