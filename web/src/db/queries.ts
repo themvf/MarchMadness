@@ -1,5 +1,5 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks } from "./schema";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks, oddsSnapshots } from "./schema";
 import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
@@ -577,6 +577,46 @@ export async function getBracketMatchups(
     ORDER BY bm.round, bm.matchup_slot
   `);
   return result.rows;
+}
+
+// ── Odds Snapshots (Line Movement) ──────────────────────────
+
+export type OddsSnapshotRow = {
+  matchupId: number;
+  spreadA: number | null;
+  mlA: number | null;
+  mlB: number | null;
+  total: number | null;
+  probA: number | null;
+  fetchedAt: Date | null;
+};
+
+export async function getOddsSnapshots(
+  matchupIds: number[]
+): Promise<Map<number, OddsSnapshotRow[]>> {
+  if (matchupIds.length === 0) return new Map();
+
+  const result = await db.execute<OddsSnapshotRow>(sql`
+    SELECT
+      matchup_id as "matchupId",
+      spread_a as "spreadA",
+      ml_a as "mlA",
+      ml_b as "mlB",
+      total,
+      prob_a as "probA",
+      fetched_at as "fetchedAt"
+    FROM odds_snapshots
+    WHERE matchup_id IN ${sql`(${sql.join(matchupIds.map(id => sql`${id}`), sql`, `)})`}
+    ORDER BY matchup_id, fetched_at
+  `);
+
+  const map = new Map<number, OddsSnapshotRow[]>();
+  for (const row of result.rows) {
+    const existing = map.get(row.matchupId) ?? [];
+    existing.push(row);
+    map.set(row.matchupId, existing);
+  }
+  return map;
 }
 
 // ── War Room (Efficiency Scatter) ─────────────────────────

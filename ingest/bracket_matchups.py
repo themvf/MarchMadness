@@ -342,6 +342,16 @@ def fetch_tournament_odds(
             game_date=game_date.isoformat(),
         )
 
+        # Also insert a snapshot for line movement tracking
+        from db.queries import insert_odds_snapshot
+        insert_odds_snapshot(
+            db, matchup_id=m["id"],
+            spread_a=vegas_spread_a,
+            ml_a=vegas_ml_a, ml_b=vegas_ml_b,
+            total=odds["total"],
+            prob_a=vegas_prob_a,
+        )
+
         name_a = m.get("team_a_name", f"Team {m['team_a_id']}")
         name_b = m.get("team_b_name", f"Team {m['team_b_id']}")
         print(f"  {name_a} vs {name_b}: spread {vegas_spread_a:+.1f}, "
@@ -434,6 +444,7 @@ if __name__ == "__main__":
         print("Usage:")
         print("  python -m ingest.bracket_matchups --generate R64")
         print("  python -m ingest.bracket_matchups --odds 2026-03-20")
+        print("  python -m ingest.bracket_matchups --snapshot       (auto-detect dates, fetch + snapshot)")
         print("  python -m ingest.bracket_matchups --update-all")
         print("  python -m ingest.bracket_matchups --advance R64")
         print("  python -m ingest.bracket_matchups --refresh")
@@ -497,6 +508,35 @@ if __name__ == "__main__":
         score_b = int(args[5])
         update_matchup_result(db, season, round_name, slot, winner_id, score_a, score_b)
         print(f"Recorded result: {round_name} slot {slot}, winner={winner_id}, score={score_a}-{score_b}")
+
+    elif args[0] == "--snapshot":
+        # Auto-detect upcoming game dates from bracket matchups and fetch odds
+        matchups = get_bracket_matchups(db, season)
+        from datetime import timedelta
+        today = date.today()
+        # Collect unique game dates that are today or in the future
+        game_dates = sorted({
+            (m["game_date"] if isinstance(m["game_date"], date)
+             else date.fromisoformat(str(m["game_date"])))
+            for m in matchups
+            if m.get("game_date") and not m.get("winner_id")
+               and (m["game_date"] if isinstance(m["game_date"], date)
+                    else date.fromisoformat(str(m["game_date"]))) >= today - timedelta(days=1)
+        })
+        if not game_dates:
+            print("No upcoming game dates found in bracket matchups")
+            sys.exit(0)
+        client = OddsApiClient(
+            api_key=config.odds_api.api_key,
+            sport_key=config.odds_api.sport_key,
+        )
+        total = 0
+        for gd in game_dates:
+            print(f"\nFetching odds snapshot for {gd}...")
+            count = fetch_tournament_odds(db, client, season, gd)
+            total += count
+        client.close()
+        print(f"\nTotal: {total} matchup odds snapshots recorded across {len(game_dates)} game dates")
 
     elif args[0] == "--show":
         matchups = get_bracket_matchups(db, season)

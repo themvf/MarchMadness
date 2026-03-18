@@ -208,6 +208,20 @@ TABLES = [
     )
     """,
 
+    # ── Odds snapshots (line movement tracking) ─────────────
+    """
+    CREATE TABLE IF NOT EXISTS odds_snapshots (
+        id SERIAL PRIMARY KEY,
+        matchup_id INTEGER NOT NULL REFERENCES bracket_matchups(id),
+        spread_a DOUBLE PRECISION,
+        ml_a INTEGER,
+        ml_b INTEGER,
+        total DOUBLE PRECISION,
+        prob_a DOUBLE PRECISION,
+        fetched_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+
     # ── Monte Carlo simulation results ───────────────────────
     """
     CREATE TABLE IF NOT EXISTS simulation_results (
@@ -241,6 +255,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_stats(player_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_team_profiles_season ON team_profiles(team_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_bracket_matchups_season ON bracket_matchups(season, round)",
+    "CREATE INDEX IF NOT EXISTS idx_odds_snapshots_matchup ON odds_snapshots(matchup_id, fetched_at)",
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",

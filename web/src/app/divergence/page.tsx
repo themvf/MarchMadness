@@ -4,8 +4,10 @@ import {
   getGamesWithOdds,
   getTeamProfiles,
   getBracketMatchups,
+  getOddsSnapshots,
   type DivergenceRow,
   type BracketMatchupRow,
+  type OddsSnapshotRow,
 } from "@/db/queries";
 import {
   Card,
@@ -50,17 +52,34 @@ export default async function DivergencePage() {
   ]);
 
   // Upcoming tournament matchups with both model + Vegas data
-  const upcomingMatchups = bracketMatchups
-    .filter(
-      (m) =>
-        m.winnerId == null &&
-        m.modelProbA != null &&
-        m.vegasProbA != null
-    )
-    .map((m) => ({
-      ...m,
-      divergence: m.modelProbA! - m.vegasProbA!,
-    }))
+  const upcomingRaw = bracketMatchups.filter(
+    (m) =>
+      m.winnerId == null &&
+      m.modelProbA != null &&
+      m.vegasProbA != null
+  );
+
+  // Fetch odds snapshots for upcoming matchups
+  const snapshotMap = upcomingRaw.length > 0
+    ? await getOddsSnapshots(upcomingRaw.map((m) => m.id))
+    : new Map<number, OddsSnapshotRow[]>();
+
+  const upcomingMatchups = upcomingRaw
+    .map((m) => {
+      const snapshots = snapshotMap.get(m.id) ?? [];
+      const openSnap = snapshots.length > 0 ? snapshots[0] : null;
+      const currentSnap = snapshots.length > 1 ? snapshots[snapshots.length - 1] : null;
+      return {
+        ...m,
+        divergence: m.modelProbA! - m.vegasProbA!,
+        openSpread: openSnap?.spreadA ?? null,
+        currentSpread: currentSnap?.spreadA ?? (openSnap?.spreadA ?? null),
+        spreadMove: openSnap && currentSnap
+          ? (currentSnap.spreadA ?? 0) - (openSnap.spreadA ?? 0)
+          : null,
+        snapshotCount: snapshots.length,
+      };
+    })
     .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
 
   if (rows.length === 0) {
@@ -220,6 +239,9 @@ export default async function DivergencePage() {
                     <TableHead className="text-right">Our Model</TableHead>
                     <TableHead className="text-right">Vegas</TableHead>
                     <TableHead className="text-right">Gap</TableHead>
+                    <TableHead className="text-right">Open</TableHead>
+                    <TableHead className="text-right">Current</TableHead>
+                    <TableHead className="text-right">Move</TableHead>
                     <TableHead>Edge</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -297,6 +319,33 @@ export default async function DivergencePage() {
                           >
                             {(absGap * 100).toFixed(0)}%
                           </span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm text-muted-foreground">
+                          {m.openSpread != null
+                            ? (m.openSpread > 0 ? "+" : "") + m.openSpread.toFixed(1)
+                            : "---"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {m.currentSpread != null
+                            ? (m.currentSpread > 0 ? "+" : "") + m.currentSpread.toFixed(1)
+                            : "---"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">
+                          {m.spreadMove != null ? (
+                            <span
+                              className={
+                                Math.abs(m.spreadMove) >= 1.5
+                                  ? "font-bold text-yellow-600"
+                                  : Math.abs(m.spreadMove) >= 0.5
+                                    ? "text-orange-500"
+                                    : "text-muted-foreground"
+                              }
+                            >
+                              {m.spreadMove > 0 ? "+" : ""}{m.spreadMove.toFixed(1)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">---</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           {absGap > 0.05 ? (

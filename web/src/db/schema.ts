@@ -234,6 +234,23 @@ export const bracketMatchups = pgTable(
   ]
 );
 
+export const oddsSnapshots = pgTable(
+  "odds_snapshots",
+  {
+    id: serial("id").primaryKey(),
+    matchupId: integer("matchup_id")
+      .notNull()
+      .references(() => bracketMatchups.id),
+    spreadA: doublePrecision("spread_a"),
+    mlA: integer("ml_a"),
+    mlB: integer("ml_b"),
+    total: doublePrecision("total"),
+    probA: doublePrecision("prob_a"),
+    fetchedAt: timestamp("fetched_at").defaultNow(),
+  },
+  (t) => [index("idx_odds_snapshots_matchup").on(t.matchupId, t.fetchedAt)]
+);
+
 export const publicPicks = pgTable(
   "public_picks",
   {
@@ -266,4 +283,5 @@ export type SimulationResult = typeof simulationResults.$inferSelect;
 export type PlayerStat = typeof playerStats.$inferSelect;
 export type TeamProfile = typeof teamProfiles.$inferSelect;
 export type BracketMatchup = typeof bracketMatchups.$inferSelect;
+export type OddsSnapshot = typeof oddsSnapshots.$inferSelect;
 export type PublicPick = typeof publicPicks.$inferSelect;

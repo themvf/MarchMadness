@@ -1,0 +1,26 @@
+name: Tournament Odds Snapshot
+on:
+  schedule:
+    # Every 3 hours: midnight, 3AM, 6AM, 9AM, noon, 3PM, 6PM, 9PM UTC
+    # (covers 7PM-4PM ET — active betting hours)
+    - cron: '0 */3 * * *'
+  workflow_dispatch: {}  # Manual trigger
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - run: pip install -r requirements.txt
+
+      - name: Fetch odds snapshot
+        run: python -m ingest.bracket_matchups --snapshot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}

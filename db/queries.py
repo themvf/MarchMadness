@@ -330,6 +330,40 @@ def update_matchup_result(db: DatabaseManager, season: int, round_name: str,
     )
 
 
+# ── Odds Snapshots ─────────────────────────────────────────
+
+def insert_odds_snapshot(
+    db: DatabaseManager, matchup_id: int,
+    spread_a: float = None, ml_a: int = None, ml_b: int = None,
+    total: float = None, prob_a: float = None,
+) -> int:
+    """Insert a point-in-time odds snapshot for line movement tracking."""
+    return db.execute_insert(
+        """
+        INSERT INTO odds_snapshots (matchup_id, spread_a, ml_a, ml_b, total, prob_a)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (matchup_id, spread_a, ml_a, ml_b, total, prob_a),
+    )
+
+
+def get_odds_snapshots(db: DatabaseManager, matchup_ids: list[int]) -> list[dict]:
+    """Get all odds snapshots for given matchup IDs, ordered by time."""
+    if not matchup_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(matchup_ids))
+    return db.execute(
+        f"""
+        SELECT id, matchup_id, spread_a, ml_a, ml_b, total, prob_a, fetched_at
+        FROM odds_snapshots
+        WHERE matchup_id IN ({placeholders})
+        ORDER BY matchup_id, fetched_at
+        """,
+        tuple(matchup_ids),
+    )
+
+
 # ── Simulation Results ──────────────────────────────────────
 
 def upsert_simulation_result(
