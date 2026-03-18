@@ -5,9 +5,11 @@ import {
   getTeamProfiles,
   getBracketMatchups,
   getOddsSnapshots,
+  getTeamNews,
   type DivergenceRow,
   type BracketMatchupRow,
   type OddsSnapshotRow,
+  type TeamNewsRow,
 } from "@/db/queries";
 import {
   Card,
@@ -25,6 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ArchetypeBadges } from "@/components/archetype-badges";
+import { NewsAlerts } from "@/components/news-alerts";
 
 function log5(barthagA: number, barthagB: number): number {
   const num = barthagA * (1 - barthagB);
@@ -63,6 +66,14 @@ export default async function DivergencePage() {
   const snapshotMap = upcomingRaw.length > 0
     ? await getOddsSnapshots(upcomingRaw.map((m) => m.id))
     : new Map<number, OddsSnapshotRow[]>();
+
+  // Fetch news for teams in upcoming matchups
+  const upcomingTeamIds = [
+    ...new Set(upcomingRaw.flatMap((m) => [m.teamAId, m.teamBId])),
+  ];
+  const newsMap = upcomingTeamIds.length > 0
+    ? await getTeamNews(upcomingTeamIds, 10, 48)
+    : new Map<number, TeamNewsRow[]>();
 
   const upcomingMatchups = upcomingRaw
     .map((m) => {
@@ -243,6 +254,7 @@ export default async function DivergencePage() {
                     <TableHead className="text-right">Current</TableHead>
                     <TableHead className="text-right">Move</TableHead>
                     <TableHead>Edge</TableHead>
+                    <TableHead>News</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -360,6 +372,15 @@ export default async function DivergencePage() {
                           ) : (
                             <span className="text-xs text-muted-foreground">aligned</span>
                           )}
+                        </TableCell>
+                        <TableCell>
+                          <NewsAlerts
+                            teamAId={m.teamAId}
+                            teamBId={m.teamBId}
+                            teamAName={m.teamAName}
+                            teamBName={m.teamBName}
+                            newsMap={newsMap}
+                          />
                         </TableCell>
                       </TableRow>
                     );

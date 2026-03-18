@@ -330,6 +330,28 @@ def update_matchup_result(db: DatabaseManager, season: int, round_name: str,
     )
 
 
+# ── Team News ──────────────────────────────────────────────
+
+def insert_team_news(
+    db: DatabaseManager, team_id: int, title: str, url: str,
+    source: str = "", published_at: str = None,
+    impact_score: int = 0, matched_keywords: str = "",
+) -> bool:
+    """Insert a news article. Returns True if inserted (not duplicate)."""
+    result = db.execute(
+        """
+        INSERT INTO team_news (team_id, title, url, source, published_at,
+                               impact_score, matched_keywords)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (team_id, url) DO NOTHING
+        RETURNING id
+        """,
+        (team_id, title, url, source, published_at,
+         impact_score, matched_keywords),
+    )
+    return len(result) > 0
+
+
 # ── Odds Snapshots ─────────────────────────────────────────
 
 def insert_odds_snapshot(

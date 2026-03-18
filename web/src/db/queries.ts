@@ -579,6 +579,52 @@ export async function getBracketMatchups(
   return result.rows;
 }
 
+// ── Team News (Google News RSS) ─────────────────────────────
+
+export type TeamNewsRow = {
+  id: number;
+  teamId: number;
+  title: string;
+  url: string;
+  source: string | null;
+  publishedAt: Date | null;
+  impactScore: number | null;
+  matchedKeywords: string | null;
+};
+
+export async function getTeamNews(
+  teamIds: number[],
+  minScore = 10,
+  hoursBack = 48
+): Promise<Map<number, TeamNewsRow[]>> {
+  if (teamIds.length === 0) return new Map();
+
+  const result = await db.execute<TeamNewsRow>(sql`
+    SELECT
+      id,
+      team_id as "teamId",
+      title,
+      url,
+      source,
+      published_at as "publishedAt",
+      impact_score as "impactScore",
+      matched_keywords as "matchedKeywords"
+    FROM team_news
+    WHERE team_id IN ${sql`(${sql.join(teamIds.map(id => sql`${id}`), sql`, `)})`}
+      AND impact_score >= ${minScore}
+      AND published_at >= NOW() - INTERVAL '${sql.raw(String(hoursBack))} hours'
+    ORDER BY impact_score DESC, published_at DESC
+  `);
+
+  const map = new Map<number, TeamNewsRow[]>();
+  for (const row of result.rows) {
+    const existing = map.get(row.teamId) ?? [];
+    existing.push(row);
+    map.set(row.teamId, existing);
+  }
+  return map;
+}
+
 // ── Odds Snapshots (Line Movement) ──────────────────────────
 
 export type OddsSnapshotRow = {

@@ -234,6 +234,27 @@ export const bracketMatchups = pgTable(
   ]
 );
 
+export const teamNews = pgTable(
+  "team_news",
+  {
+    id: serial("id").primaryKey(),
+    teamId: integer("team_id")
+      .notNull()
+      .references(() => teams.teamId),
+    title: text("title").notNull(),
+    url: text("url").notNull(),
+    source: text("source").default(""),
+    publishedAt: timestamp("published_at"),
+    impactScore: integer("impact_score").default(0),
+    matchedKeywords: text("matched_keywords").default(""),
+    fetchedAt: timestamp("fetched_at").defaultNow(),
+  },
+  (t) => [
+    unique("team_news_team_id_url_key").on(t.teamId, t.url),
+    index("idx_team_news_team").on(t.teamId, t.publishedAt),
+  ]
+);
+
 export const oddsSnapshots = pgTable(
   "odds_snapshots",
   {
@@ -283,5 +304,6 @@ export type SimulationResult = typeof simulationResults.$inferSelect;
 export type PlayerStat = typeof playerStats.$inferSelect;
 export type TeamProfile = typeof teamProfiles.$inferSelect;
 export type BracketMatchup = typeof bracketMatchups.$inferSelect;
+export type TeamNewsArticle = typeof teamNews.$inferSelect;
 export type OddsSnapshot = typeof oddsSnapshots.$inferSelect;
 export type PublicPick = typeof publicPicks.$inferSelect;

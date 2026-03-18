@@ -208,6 +208,22 @@ TABLES = [
     )
     """,
 
+    # ── Team news (Google News RSS) ──────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS team_news (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(team_id),
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        source TEXT DEFAULT '',
+        published_at TIMESTAMPTZ,
+        impact_score INTEGER DEFAULT 0,
+        matched_keywords TEXT DEFAULT '',
+        fetched_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(team_id, url)
+    )
+    """,
+
     # ── Odds snapshots (line movement tracking) ─────────────
     """
     CREATE TABLE IF NOT EXISTS odds_snapshots (
@@ -256,6 +272,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_team_profiles_season ON team_profiles(team_id, season)",
     "CREATE INDEX IF NOT EXISTS idx_bracket_matchups_season ON bracket_matchups(season, round)",
     "CREATE INDEX IF NOT EXISTS idx_odds_snapshots_matchup ON odds_snapshots(matchup_id, fetched_at)",
+    "CREATE INDEX IF NOT EXISTS idx_team_news_team ON team_news(team_id, published_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_team_news_impact ON team_news(impact_score DESC, published_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",

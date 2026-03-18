@@ -1,4 +1,4 @@
-name: Tournament Odds Snapshot
+name: Tournament Data Refresh
 on:
   schedule:
     # Every 3 hours: midnight, 3AM, 6AM, 9AM, noon, 3PM, 6PM, 9PM UTC
@@ -7,7 +7,7 @@ on:
   workflow_dispatch: {}  # Manual trigger
 
 jobs:
-  snapshot:
+  refresh:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,3 +24,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+      - name: Fetch team news
+        run: python -m ingest.news
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
