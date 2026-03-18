@@ -92,7 +92,7 @@ def build_search_query(canonical_name: str, odds_api_name: str) -> str:
         base = f"NCAA {base}"
 
     keywords = "injury OR out OR suspended OR questionable"
-    return f'"{base}" basketball ({keywords}) when:2d'
+    return f'"{base}" men\'s basketball ({keywords}) when:2d'
 
 
 def fetch_rss_feed(
