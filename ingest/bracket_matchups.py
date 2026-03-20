@@ -20,7 +20,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from config import AppConfig, load_config
+from config import AppConfig, MODELS_DIR, load_config
 from db.database import DatabaseManager
 from db.queries import (
     get_bracket,
@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 SEED_ORDER = [1, 16, 8, 9, 5, 12, 4, 13, 6, 11, 3, 14, 7, 10, 2, 15]
 
 ROUNDS = ["R64", "R32", "S16", "E8", "F4", "NCG"]
+
+TOURNAMENT_MODEL = MODELS_DIR / "xgb_tournament_predictor.joblib"
 
 
 def log5(barthag_a: float, barthag_b: float) -> float:
@@ -455,7 +457,7 @@ if __name__ == "__main__":
     if args[0] == "--generate":
         round_name = args[1] if len(args) > 1 else "R64"
         print(f"Generating {round_name} matchups for season {season}...")
-        count = generate_matchups(db, season, round_name)
+        count = generate_matchups(db, season, round_name, model_path=TOURNAMENT_MODEL)
         print(f"Done: {count} matchups")
 
     elif args[0] == "--odds":
@@ -473,13 +475,13 @@ if __name__ == "__main__":
 
     elif args[0] == "--update-all":
         print(f"Recomputing all model predictions for season {season}...")
-        update_all(db, season)
+        update_all(db, season, model_path=TOURNAMENT_MODEL)
 
     elif args[0] == "--refresh":
         print(f"Refreshing all data for season {season}...")
         refresh_data(db, season)
         print("Recomputing model predictions with fresh data...")
-        update_all(db, season)
+        update_all(db, season, model_path=TOURNAMENT_MODEL)
 
     elif args[0] == "--advance":
         if len(args) < 2:
@@ -494,7 +496,7 @@ if __name__ == "__main__":
         refresh_data(db, season)
 
         print(f"\nAdvancing {prev_round} winners to generate {next_round} matchups...")
-        count = generate_matchups(db, season, next_round)
+        count = generate_matchups(db, season, next_round, model_path=TOURNAMENT_MODEL)
         print(f"Done: {count} matchups")
 
     elif args[0] == "--result":
