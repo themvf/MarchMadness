@@ -44,10 +44,10 @@ export const REGIONS = ["East", "Midwest", "South", "West"] as const;
 // Standard NCAA bracket seed matchups — adjacent pairs play each other
 export const SEED_ORDER = [1, 16, 8, 9, 5, 12, 4, 13, 6, 11, 3, 14, 7, 10, 2, 15];
 
-// Final Four pairings: East vs Midwest, South vs West
+// Final Four pairings: East vs South, West vs Midwest
 export const FF_PAIRINGS: [string, string][] = [
-  ["East", "Midwest"],
-  ["South", "West"],
+  ["East", "South"],
+  ["West", "Midwest"],
 ];
 
 export const ROUND_LABELS: Record<string, string> = {
