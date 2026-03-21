@@ -425,34 +425,8 @@ export default function BracketBuilderClient({
   const [activeRegion, setActiveRegion] = useState<string>("all");
   const [loaded, setLoaded] = useState(false);
 
-  // Derive locked picks from DB results (slots with a confirmed winner)
-  const lockedSlotIds = useMemo(() => {
-    const s = new Set<string>();
-    for (const mu of matchups) {
-      if (mu.winnerId != null && mu.region) {
-        s.add(`${mu.round}-${mu.region}-${mu.matchupSlot}`);
-      }
-    }
-    return s;
-  }, [matchups]);
-
-  const lockedPicks = useMemo(() => {
-    const lp: PickState = {};
-    for (const mu of matchups) {
-      if (mu.winnerId != null && mu.region) {
-        lp[`${mu.round}-${mu.region}-${mu.matchupSlot}`] = mu.winnerId;
-      }
-    }
-    return lp;
-  }, [matchups]);
-
   // Load picks from localStorage on mount, locked results always win
-  useEffect(() => {
-    const stored = loadPicks();
-    setPicks({ ...stored, ...lockedPicks });
-    setLoaded(true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // (lockedPicks depends on slots, so this effect is set after slots is built)
 
   // Save picks on change
   useEffect(() => {
@@ -510,6 +484,52 @@ export default function BracketBuilderClient({
 
   // Build slot map
   const slots = useMemo(() => buildSlotMap(teamsWithPlaceholders), [teamsWithPlaceholders]);
+
+  // Derive locked picks from DB results — match by team IDs since DB slot
+  // numbers are global (1-32) but the slot map uses per-region numbers (1-8).
+  const lockedSlotIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const mu of matchups) {
+      if (mu.winnerId == null) continue;
+      for (const [slotId, def] of slots) {
+        if (def.round !== mu.round) continue;
+        if (
+          (def.presetTeamAId === mu.teamAId && def.presetTeamBId === mu.teamBId) ||
+          (def.presetTeamAId === mu.teamBId && def.presetTeamBId === mu.teamAId)
+        ) {
+          s.add(slotId);
+          break;
+        }
+      }
+    }
+    return s;
+  }, [matchups, slots]);
+
+  const lockedPicks = useMemo(() => {
+    const lp: PickState = {};
+    for (const mu of matchups) {
+      if (mu.winnerId == null) continue;
+      for (const [slotId, def] of slots) {
+        if (def.round !== mu.round) continue;
+        if (
+          (def.presetTeamAId === mu.teamAId && def.presetTeamBId === mu.teamBId) ||
+          (def.presetTeamAId === mu.teamBId && def.presetTeamBId === mu.teamAId)
+        ) {
+          lp[slotId] = mu.winnerId;
+          break;
+        }
+      }
+    }
+    return lp;
+  }, [matchups, slots]);
+
+  // Load picks from localStorage on mount, locked results always win
+  useEffect(() => {
+    const stored = loadPicks();
+    setPicks({ ...stored, ...lockedPicks });
+    setLoaded(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Build R64 model probability map (slotId -> probA)
   const r64ModelProbs = useMemo(() => {
