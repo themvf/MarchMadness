@@ -80,6 +80,7 @@ export default function DfsClient({ players, slateDate }: Props) {
   // ── Generated lineups ─────────────────────────────────────
   const [lineups, setLineups] = useState<GeneratedLineup[] | null>(null);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizeError, setOptimizeError] = useState<string | null>(null);
 
   // ── Multi-entry export state ──────────────────────────────
   const [entryTemplate, setEntryTemplate] = useState("");
@@ -204,13 +205,23 @@ export default function DfsClient({ players, slateDate }: Props) {
   };
 
   const handleOptimize = async () => {
-    const ids = filteredPlayers.map((p) => p.id);
-    if (ids.length < 8) return;
+    if (filteredPlayers.length < 8) return;
     setIsOptimizing(true);
+    setOptimizeError(null);
+    setLineups(null);
     try {
+      const ids = filteredPlayers.map((p) => p.id);
       const settings: OptimizerSettings = { mode, nLineups, minStack, maxExposure };
       const result = await runOptimizer(ids, settings);
-      setLineups(result);
+      if (result.length === 0) {
+        setOptimizeError(
+          "No feasible lineups found. Try selecting more games or reducing min stack."
+        );
+      } else {
+        setLineups(result);
+      }
+    } catch (err) {
+      setOptimizeError(`Optimizer error: ${String(err)}`);
     } finally {
       setIsOptimizing(false);
     }
@@ -435,6 +446,9 @@ export default function DfsClient({ players, slateDate }: Props) {
           >
             {isOptimizing ? "Optimizing…" : `Generate ${nLineups} Lineup${nLineups !== 1 ? "s" : ""}`}
           </Button>
+          {optimizeError && (
+            <p className="mt-2 text-xs text-red-500">{optimizeError}</p>
+          )}
         </CardContent>
       </Card>
 
