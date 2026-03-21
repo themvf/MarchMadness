@@ -195,7 +195,7 @@ export default async function BracketMatchupsPage() {
             Tournament Matchups
           </h1>
           <p className="text-muted-foreground">
-            Model predictions vs Vegas odds for every tournament game
+            Tournament-tuned XGBoost predictions vs Vegas odds for every tournament game
           </p>
         </div>
         <Card>
@@ -256,7 +256,7 @@ export default async function BracketMatchupsPage() {
           Tournament Matchups
         </h1>
         <p className="text-muted-foreground">
-          Model predictions vs Vegas odds for every tournament game (
+          Tournament-tuned XGBoost predictions vs Vegas odds for every tournament game (
           {matchups.length} matchups)
         </p>
       </div>

@@ -236,7 +236,7 @@ export default async function DivergencePage() {
           <CardHeader>
             <CardTitle>Upcoming Tournament: Model vs Vegas</CardTitle>
             <CardDescription>
-              Where our XGBoost model disagrees with Vegas on upcoming matchups
+              Where our tournament-tuned XGBoost model (neutral-site weighted) disagrees with Vegas on upcoming matchups
               ({upcomingMatchups.length} games with odds)
             </CardDescription>
           </CardHeader>
