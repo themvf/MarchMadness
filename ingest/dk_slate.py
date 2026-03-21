@@ -54,11 +54,14 @@ DK_ABBREV_OVERRIDES: dict[str, str] = {
     "CONN": "Connecticut",
     "CCONN": "Connecticut",
     "UCONN": "Connecticut",
+    "MICH": "Michigan",
     "MICH ST": "Michigan State",
     "MSU": "Michigan State",
     "LOU": "Louisville",
+    "UL": "Louisville",
     "UCLA": "UCLA",
     "TTU": "Texas Tech",
+    "STL": "Saint Louis",
     "SLU": "Saint Louis",
     "UVA": "Virginia",
     "VIRG": "Virginia",
@@ -66,17 +69,22 @@ DK_ABBREV_OVERRIDES: dict[str, str] = {
     "IOWA ST": "Iowa State",
     "UK": "Kentucky",
     "VAN": "Vanderbilt",
+    "VAND": "Vanderbilt",
     "IOWA": "Iowa",
     "NEB": "Nebraska",
     "VCU": "VCU",
+    "IL": "Illinois",
     "ILL": "Illinois",
     "TXAM": "Texas A&M",
     "TA&M": "Texas A&M",
     "AZ": "Arizona",
     "HOU": "Houston",
+    "UH": "Houston",
+    "TEX": "Texas",
     "UTST": "Utah State",
     "USU": "Utah State",
     "HPT": "High Point",
+    "HIGHP": "High Point",
     "HIGH PT": "High Point",
     "GONZ": "Gonzaga",
     "ARK": "Arkansas",
@@ -436,7 +444,6 @@ def run(dk_path: str, linestar_path: str, date_override: str | None = None,
         )
         saved += 1
 
-    db.close()
     print(f"Saved {saved} players to slate {slate_id} ({slate_date})")
 
 
