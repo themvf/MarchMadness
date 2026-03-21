@@ -864,6 +864,7 @@ export type DkPlayerRow = {
   projOwnPct: number | null;
   ourProj: number | null;
   ourLeverage: number | null;
+  actualFpts: number | null;
   // Joined fields
   teamName: string | null;
   teamLogo: string | null;
@@ -893,6 +894,7 @@ export async function getDkPlayers(
       dp.proj_own_pct as "projOwnPct",
       dp.our_proj as "ourProj",
       dp.our_leverage as "ourLeverage",
+      dp.actual_fpts as "actualFpts",
       t.name as "teamName",
       t.logo_url as "teamLogo",
       bm.model_prob_a as "modelProbA",
@@ -909,6 +911,77 @@ export async function getDkPlayers(
     ORDER BY dp.our_leverage DESC NULLS LAST, dp.our_proj DESC NULLS LAST
   `);
   return result.rows;
+}
+
+// ── DFS Accuracy (projection vs actuals) ──────────────────
+
+export type DfsAccuracyMetrics = {
+  ourMAE: number | null;
+  ourBias: number | null;
+  linestarMAE: number | null;
+  linestarBias: number | null;
+  nOur: number;
+  nLinestar: number;
+  slateDate: string | null;
+};
+
+export type DfsAccuracyRow = {
+  id: number;
+  name: string;
+  teamAbbrev: string;
+  salary: number;
+  eligiblePositions: string;
+  ourProj: number | null;
+  linestarProj: number | null;
+  actualFpts: number | null;
+  teamLogo: string | null;
+};
+
+export async function getDfsAccuracy(): Promise<{
+  metrics: DfsAccuracyMetrics;
+  players: DfsAccuracyRow[];
+} | null> {
+  // Only return data if actuals exist on the most recent slate
+  const metricResult = await db.execute<{
+    ourMAE: number | null; ourBias: number | null;
+    linestarMAE: number | null; linestarBias: number | null;
+    nOur: number; nLinestar: number; slateDate: string | null;
+  }>(sql`
+    SELECT
+      AVG(ABS(dp.our_proj - dp.actual_fpts))
+        FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.our_proj IS NOT NULL) as "ourMAE",
+      AVG(dp.our_proj - dp.actual_fpts)
+        FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.our_proj IS NOT NULL) as "ourBias",
+      AVG(ABS(dp.linestar_proj - dp.actual_fpts))
+        FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.linestar_proj IS NOT NULL) as "linestarMAE",
+      AVG(dp.linestar_proj - dp.actual_fpts)
+        FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.linestar_proj IS NOT NULL) as "linestarBias",
+      COUNT(*) FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.our_proj IS NOT NULL) as "nOur",
+      COUNT(*) FILTER (WHERE dp.actual_fpts IS NOT NULL AND dp.linestar_proj IS NOT NULL) as "nLinestar",
+      ds.slate_date as "slateDate"
+    FROM dk_players dp
+    INNER JOIN dk_slates ds ON ds.id = dp.slate_id
+    WHERE ds.id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
+    GROUP BY ds.slate_date
+  `);
+
+  const metrics = metricResult.rows[0];
+  if (!metrics || metrics.nOur === 0) return null;
+
+  const playerResult = await db.execute<DfsAccuracyRow>(sql`
+    SELECT
+      dp.id, dp.name, dp.team_abbrev as "teamAbbrev", dp.salary,
+      dp.eligible_positions as "eligiblePositions",
+      dp.our_proj as "ourProj", dp.linestar_proj as "linestarProj",
+      dp.actual_fpts as "actualFpts", t.logo_url as "teamLogo"
+    FROM dk_players dp
+    LEFT JOIN teams t ON t.team_id = dp.team_id
+    WHERE dp.slate_id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
+      AND dp.actual_fpts IS NOT NULL
+    ORDER BY ABS(COALESCE(dp.our_proj, 0) - dp.actual_fpts) DESC NULLS LAST
+  `);
+
+  return { metrics, players: playerResult.rows };
 }
 
 export async function getLatestSlateInfo(): Promise<{ slateDate: string; gameCount: number | null } | null> {

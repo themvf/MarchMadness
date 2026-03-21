@@ -10,13 +10,14 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { DkPlayerRow } from "@/db/queries";
+import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow } from "@/db/queries";
 import type { GeneratedLineup, OptimizerSettings } from "./optimizer";
 import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups } from "./actions";
 
 type Props = {
   players: DkPlayerRow[];
   slateDate: string | null;
+  accuracy: { metrics: DfsAccuracyMetrics; players: DfsAccuracyRow[] } | null;
 };
 
 type SortCol =
@@ -48,7 +49,7 @@ function formatDate(gameInfo: string | null): string {
   return `${mm}/${dd}`;
 }
 
-export default function DfsClient({ players, slateDate }: Props) {
+export default function DfsClient({ players, slateDate, accuracy }: Props) {
   const [isPending, startTransition] = useTransition();
 
   // ── Upload state ─────────────────────────────────────────
@@ -610,6 +611,9 @@ export default function DfsClient({ players, slateDate }: Props) {
           </CardContent>
         </Card>
       )}
+
+      {/* Accuracy Panel — only shown when actuals have been ingested */}
+      {accuracy && <AccuracyPanel metrics={accuracy.metrics} players={accuracy.players} />}
     </div>
   );
 }
@@ -735,6 +739,124 @@ function LineupCard({ lineup, num }: { lineup: GeneratedLineup; num: number }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function AccuracyPanel({
+  metrics,
+  players,
+}: {
+  metrics: DfsAccuracyMetrics;
+  players: DfsAccuracyRow[];
+}) {
+  const ourWon =
+    metrics.ourMAE != null &&
+    metrics.linestarMAE != null &&
+    metrics.ourMAE < metrics.linestarMAE;
+  const diff =
+    metrics.ourMAE != null && metrics.linestarMAE != null
+      ? Math.abs(metrics.ourMAE - metrics.linestarMAE)
+      : null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">
+          Projection Accuracy — {metrics.slateDate}
+        </CardTitle>
+        <CardDescription>
+          Based on {metrics.nOur} players with actual DK FPTS
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Summary metrics */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <MetricCard
+            label="Our MAE"
+            value={metrics.ourMAE != null ? `${metrics.ourMAE.toFixed(2)} pts` : "–"}
+            sub={metrics.ourBias != null ? `Bias: ${metrics.ourBias > 0 ? "+" : ""}${metrics.ourBias.toFixed(2)}` : undefined}
+            highlight={ourWon}
+          />
+          <MetricCard
+            label="LineStar MAE"
+            value={metrics.linestarMAE != null ? `${metrics.linestarMAE.toFixed(2)} pts` : "–"}
+            sub={metrics.linestarBias != null ? `Bias: ${metrics.linestarBias > 0 ? "+" : ""}${metrics.linestarBias.toFixed(2)}` : undefined}
+            highlight={!ourWon && metrics.linestarMAE != null}
+          />
+          <MetricCard
+            label="Winner"
+            value={diff != null ? (ourWon ? "Our Model" : "LineStar") : "–"}
+            sub={diff != null ? `By ${diff.toFixed(2)} pts/player` : undefined}
+          />
+          <MetricCard
+            label="Sample"
+            value={`${metrics.nOur} players`}
+            sub={`LS: ${metrics.nLinestar}`}
+          />
+        </div>
+
+        {/* Per-player error table */}
+        <div className="overflow-x-auto">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Biggest misses (sorted by |Our Error|)
+          </p>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="px-2 py-1">Player</th>
+                <th className="px-2 py-1">Sal</th>
+                <th className="px-2 py-1">Our Proj</th>
+                <th className="px-2 py-1">LS Proj</th>
+                <th className="px-2 py-1">Actual</th>
+                <th className="px-2 py-1">Our Err</th>
+                <th className="px-2 py-1">LS Err</th>
+              </tr>
+            </thead>
+            <tbody>
+              {players.slice(0, 30).map((p) => {
+                const ourErr = p.ourProj != null && p.actualFpts != null ? p.ourProj - p.actualFpts : null;
+                const lsErr = p.linestarProj != null && p.actualFpts != null ? p.linestarProj - p.actualFpts : null;
+                return (
+                  <tr key={p.id} className="border-b hover:bg-muted/30">
+                    <td className="px-2 py-1">
+                      <div className="flex items-center gap-1">
+                        {p.teamLogo && <img src={p.teamLogo} alt="" className="h-3 w-3 object-contain" />}
+                        <span className="font-medium">{p.name}</span>
+                        <span className="text-muted-foreground">{p.teamAbbrev}</span>
+                      </div>
+                    </td>
+                    <td className="px-2 py-1 font-mono">${(p.salary / 1000).toFixed(1)}k</td>
+                    <td className="px-2 py-1">{p.ourProj?.toFixed(1) ?? "–"}</td>
+                    <td className="px-2 py-1">{p.linestarProj?.toFixed(1) ?? "–"}</td>
+                    <td className="px-2 py-1 font-medium">{p.actualFpts?.toFixed(1) ?? "–"}</td>
+                    <td className={`px-2 py-1 font-medium ${ourErr == null ? "" : Math.abs(ourErr) > 10 ? "text-red-500" : Math.abs(ourErr) < 4 ? "text-green-600" : ""}`}>
+                      {ourErr != null ? `${ourErr > 0 ? "+" : ""}${ourErr.toFixed(1)}` : "–"}
+                    </td>
+                    <td className={`px-2 py-1 ${lsErr == null ? "text-muted-foreground" : Math.abs(lsErr) > 10 ? "text-red-400" : ""}`}>
+                      {lsErr != null ? `${lsErr > 0 ? "+" : ""}${lsErr.toFixed(1)}` : "–"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MetricCard({
+  label, value, sub, highlight,
+}: {
+  label: string; value: string; sub?: string; highlight?: boolean;
+}) {
+  return (
+    <div className={`rounded-lg border p-2.5 ${highlight ? "border-green-500/40 bg-green-500/5" : ""}`}>
+      <p className="text-[10px] text-muted-foreground">{label}</p>
+      <p className="text-sm font-bold">{value}</p>
+      {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
     </div>
   );
 }

@@ -284,9 +284,17 @@ TABLES = [
         proj_own_pct REAL,
         our_proj REAL,
         our_leverage REAL,
+        actual_fpts REAL,
         UNIQUE(slate_id, dk_player_id)
     )
     """,
+]
+
+# ── Idempotent column migrations ──────────────────────────────
+# Applied on every DatabaseManager init via ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+# Safe to re-run — Postgres ignores duplicates.
+MIGRATIONS = [
+    "ALTER TABLE dk_players ADD COLUMN IF NOT EXISTS actual_fpts REAL",
 ]
 
 INDEXES = [

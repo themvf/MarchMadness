@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Optional
 
-from db.schema import TABLES, INDEXES
+from db.schema import TABLES, INDEXES, MIGRATIONS
 
 
 class DatabaseManager:
@@ -72,10 +72,12 @@ class DatabaseManager:
                 cur.execute(sql, params)
 
     def _ensure_schema(self) -> None:
-        """Create all tables and indexes if they don't exist."""
+        """Create all tables, indexes, and run idempotent column migrations."""
         with self.connect() as conn:
             cur = conn.cursor()
             for table_sql in TABLES:
                 cur.execute(table_sql)
             for index_sql in INDEXES:
                 cur.execute(index_sql)
+            for migration_sql in MIGRATIONS:
+                cur.execute(migration_sql)
