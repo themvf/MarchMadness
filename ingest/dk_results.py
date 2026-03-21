@@ -166,6 +166,66 @@ def run(results_path: str, slate_date: str | None = None) -> None:
             diff = abs(stats["our_mae"] - stats["ls_mae"])
             print(f"  Winner: {winner} by {diff:.2f} pts/player")
 
+    update_lineup_actuals(db, slate_id)
+
+
+def update_lineup_actuals(db, slate_id: int) -> None:
+    """Sum actual_fpts for each saved lineup's players and store in dk_lineups.actual_fpts.
+
+    Called automatically after player actuals are updated. Safe to re-run.
+    """
+    lineups = db.execute(
+        "SELECT id, player_ids FROM dk_lineups WHERE slate_id = %s", (slate_id,)
+    )
+    if not lineups:
+        return
+
+    updated = 0
+    for lineup in lineups:
+        ids = [int(x) for x in lineup["player_ids"].split(",") if x.strip()]
+        if not ids:
+            continue
+        placeholders = ",".join(["%s"] * len(ids))
+        result = db.execute_one(
+            f"SELECT SUM(actual_fpts) AS total FROM dk_players "
+            f"WHERE id IN ({placeholders}) AND actual_fpts IS NOT NULL",
+            ids,
+        )
+        if result and result["total"] is not None:
+            db.execute(
+                "UPDATE dk_lineups SET actual_fpts = %s WHERE id = %s",
+                (result["total"], lineup["id"]),
+            )
+            updated += 1
+
+    print(f"Lineup actuals updated: {updated}/{len(lineups)}")
+
+    # Print strategy comparison
+    comparison = db.execute(
+        """
+        SELECT
+            strategy,
+            COUNT(*) AS n,
+            AVG(proj_fpts) AS avg_proj,
+            AVG(actual_fpts) AS avg_actual
+        FROM dk_lineups
+        WHERE slate_id = %s AND actual_fpts IS NOT NULL
+        GROUP BY strategy
+        ORDER BY avg_actual DESC NULLS LAST
+        """,
+        (slate_id,),
+    )
+    if comparison:
+        print(f"\n-- Strategy Comparison ({'slate_id=' + str(slate_id)}) --")
+        print(f"  {'Strategy':<12}  {'N':>4}  {'AvgProj':>8}  {'AvgActual':>10}")
+        print("  " + "-" * 38)
+        for row in comparison:
+            avg_actual = f"{row['avg_actual']:.1f}" if row["avg_actual"] else "pending"
+            print(
+                f"  {row['strategy']:<12}  {row['n']:>4}  "
+                f"{row['avg_proj']:>8.1f}  {avg_actual:>10}"
+            )
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

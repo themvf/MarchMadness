@@ -344,6 +344,46 @@ def optimize(
     return lineups
 
 
+# ── DB persistence ───────────────────────────────────────────
+
+
+def save_lineups(db, slate_id: int, strategy: str, lineups: list[Lineup]) -> None:
+    """Upsert generated lineups into dk_lineups (idempotent per strategy)."""
+    # Clear previous run for this slate+strategy so re-runs are clean
+    db.execute(
+        "DELETE FROM dk_lineups WHERE slate_id = %s AND strategy = %s",
+        (slate_id, strategy),
+    )
+    rows = [
+        (
+            slate_id,
+            strategy,
+            i,
+            ",".join(str(p.id) for p in lu.players),
+            lu.total_salary,
+            lu.proj_fpts,
+            lu.leverage,
+            lu.stack_team,
+        )
+        for i, lu in enumerate(lineups, 1)
+    ]
+    db.execute_many(
+        """
+        INSERT INTO dk_lineups
+            (slate_id, strategy, lineup_num, player_ids, total_salary, proj_fpts, leverage, stack_team)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (slate_id, strategy, lineup_num) DO UPDATE SET
+            player_ids   = EXCLUDED.player_ids,
+            total_salary = EXCLUDED.total_salary,
+            proj_fpts    = EXCLUDED.proj_fpts,
+            leverage     = EXCLUDED.leverage,
+            stack_team   = EXCLUDED.stack_team
+        """,
+        rows,
+    )
+    print(f"Saved {len(lineups)} lineups to dk_lineups (slate={slate_id}, strategy='{strategy}')")
+
+
 # ── Reports ──────────────────────────────────────────────────
 
 
@@ -420,6 +460,8 @@ def run(
     stack_min_win_prob: float = DEFAULT_STACK_MIN_WIN_PROB,
     stack_max_win_prob: float = DEFAULT_STACK_MAX_WIN_PROB,
     slate_date: str | None = None,
+    strategy: str | None = None,
+    save: bool = False,
 ) -> None:
     config = load_config()
     db = DatabaseManager(config.database_url)
@@ -498,6 +540,10 @@ def run(
         f.write(csv_content)
     print(f"\nSaved {len(lineups)} lineups -> {out_path}")
 
+    if save:
+        label = strategy or f"{mode}_stack{min_stack}"
+        save_lineups(db, slate["id"], label, lineups)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
@@ -515,10 +561,14 @@ if __name__ == "__main__":
     parser.add_argument("--stack-max-prob", type=float, default=DEFAULT_STACK_MAX_WIN_PROB,
                         help="Max win prob to allow as primary stack (blowout filter)")
     parser.add_argument("--slate-date")
+    parser.add_argument("--strategy", default=None,
+                        help="Label for this run in dk_lineups (e.g. 'basic', 'stacked')")
+    parser.add_argument("--save", action="store_true",
+                        help="Save lineups to dk_lineups table for post-slate comparison")
     args = parser.parse_args()
     run(
         args.entries, args.out, args.n, args.mode, args.stack,
         args.bring_back, args.exposure,
         args.stack_min_prob, args.stack_max_prob,
-        args.slate_date,
+        args.slate_date, args.strategy, args.save,
     )

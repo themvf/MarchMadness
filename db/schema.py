@@ -288,6 +288,24 @@ TABLES = [
         UNIQUE(slate_id, dk_player_id)
     )
     """,
+
+    # ── DFS generated lineups (strategy comparison) ──────────
+    """
+    CREATE TABLE IF NOT EXISTS dk_lineups (
+        id SERIAL PRIMARY KEY,
+        slate_id INTEGER NOT NULL REFERENCES dk_slates(id) ON DELETE CASCADE,
+        strategy TEXT NOT NULL,
+        lineup_num INTEGER NOT NULL,
+        player_ids TEXT NOT NULL,
+        total_salary INTEGER,
+        proj_fpts REAL,
+        leverage REAL,
+        stack_team TEXT,
+        actual_fpts REAL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(slate_id, strategy, lineup_num)
+    )
+    """,
 ]
 
 # ── Idempotent column migrations ──────────────────────────────
@@ -320,4 +338,5 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",
     "CREATE INDEX IF NOT EXISTS idx_dk_players_slate ON dk_players(slate_id, our_leverage DESC NULLS LAST)",
     "CREATE INDEX IF NOT EXISTS idx_dk_players_team ON dk_players(team_id, slate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dk_lineups_slate ON dk_lineups(slate_id, strategy)",
 ]

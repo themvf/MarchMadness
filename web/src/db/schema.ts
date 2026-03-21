@@ -327,6 +327,26 @@ export const dkPlayers = pgTable(
   (t) => [unique("dk_players_slate_player_key").on(t.slateId, t.dkPlayerId)]
 );
 
+export const dkLineups = pgTable(
+  "dk_lineups",
+  {
+    id: serial("id").primaryKey(),
+    slateId: integer("slate_id")
+      .notNull()
+      .references(() => dkSlates.id),
+    strategy: text("strategy").notNull(),
+    lineupNum: integer("lineup_num").notNull(),
+    playerIds: text("player_ids").notNull(),
+    totalSalary: integer("total_salary"),
+    projFpts: doublePrecision("proj_fpts"),
+    leverage: doublePrecision("leverage"),
+    stackTeam: text("stack_team"),
+    actualFpts: doublePrecision("actual_fpts"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => [unique("dk_lineups_slate_strategy_num_key").on(t.slateId, t.strategy, t.lineupNum)]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;

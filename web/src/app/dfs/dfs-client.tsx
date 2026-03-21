@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow } from "@/db/queries";
+import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow, LineupStrategyRow } from "@/db/queries";
 import type { GeneratedLineup, OptimizerSettings } from "./optimizer";
 import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups } from "./actions";
 
@@ -18,6 +18,7 @@ type Props = {
   players: DkPlayerRow[];
   slateDate: string | null;
   accuracy: { metrics: DfsAccuracyMetrics; players: DfsAccuracyRow[] } | null;
+  comparison: LineupStrategyRow[];
 };
 
 type SortCol =
@@ -49,7 +50,7 @@ function formatDate(gameInfo: string | null): string {
   return `${mm}/${dd}`;
 }
 
-export default function DfsClient({ players, slateDate, accuracy }: Props) {
+export default function DfsClient({ players, slateDate, accuracy, comparison }: Props) {
   const [isPending, startTransition] = useTransition();
 
   // ── Upload state ─────────────────────────────────────────
@@ -614,6 +615,9 @@ export default function DfsClient({ players, slateDate, accuracy }: Props) {
 
       {/* Accuracy Panel — only shown when actuals have been ingested */}
       {accuracy && <AccuracyPanel metrics={accuracy.metrics} players={accuracy.players} />}
+
+      {/* Strategy Comparison Panel — shown whenever lineups have been saved to DB */}
+      {comparison.length > 0 && <ComparisonPanel rows={comparison} />}
     </div>
   );
 }
@@ -858,5 +862,81 @@ function MetricCard({
       <p className="text-sm font-bold">{value}</p>
       {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
     </div>
+  );
+}
+
+function ComparisonPanel({ rows }: { rows: LineupStrategyRow[] }) {
+  const hasActuals = rows.some((r) => r.avgActualFpts != null);
+  const winner = hasActuals
+    ? rows.reduce((best, r) =>
+        (r.avgActualFpts ?? -Infinity) > (best.avgActualFpts ?? -Infinity) ? r : best
+      )
+    : null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Strategy Comparison</CardTitle>
+        <CardDescription className="text-xs">
+          {hasActuals
+            ? "Post-slate results — avg lineup score by strategy"
+            : "Projected lineup scores by strategy — actuals pending after games complete"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="px-2 py-1">Strategy</th>
+                <th className="px-2 py-1 text-right">Lineups</th>
+                <th className="px-2 py-1 text-right">Avg Proj</th>
+                <th className="px-2 py-1 text-right">Avg Actual</th>
+                <th className="px-2 py-1 text-right">Avg Leverage</th>
+                <th className="px-2 py-1">Top Stack</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const isWinner = winner?.strategy === r.strategy;
+                return (
+                  <tr
+                    key={r.strategy}
+                    className={`border-b ${isWinner ? "bg-green-500/5" : "hover:bg-muted/30"}`}
+                  >
+                    <td className="px-2 py-1 font-medium">
+                      {r.strategy}
+                      {isWinner && (
+                        <Badge className="ml-1.5 bg-green-500/20 text-green-700 text-[10px]">
+                          winner
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">{r.nLineups}</td>
+                    <td className="px-2 py-1 text-right font-mono">
+                      {r.avgProjFpts?.toFixed(1) ?? "–"}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono font-medium">
+                      {r.avgActualFpts?.toFixed(1) ?? (
+                        <span className="text-muted-foreground">pending</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">
+                      {r.avgLeverage?.toFixed(1) ?? "–"}
+                    </td>
+                    <td className="px-2 py-1 text-muted-foreground">{r.topStack ?? "–"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {!hasActuals && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Run <code className="rounded bg-muted px-1 py-0.5">python -m ingest.dk_results --results DKResults.csv</code> after the slate to fill in actuals.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }

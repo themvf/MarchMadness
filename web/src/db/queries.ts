@@ -1,5 +1,5 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks, oddsSnapshots, dkSlates, dkPlayers } from "./schema";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks, oddsSnapshots, dkSlates, dkPlayers, dkLineups } from "./schema";
 import { eq, desc, asc, sql, and, or, gte, isNull } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
@@ -982,6 +982,34 @@ export async function getDfsAccuracy(): Promise<{
   `);
 
   return { metrics, players: playerResult.rows };
+}
+
+// ── DFS Lineup Strategy Comparison ────────────────────────
+
+export type LineupStrategyRow = {
+  strategy: string;
+  nLineups: number;
+  avgProjFpts: number | null;
+  avgActualFpts: number | null;
+  avgLeverage: number | null;
+  topStack: string | null;
+};
+
+export async function getDkLineupComparison(): Promise<LineupStrategyRow[]> {
+  const result = await db.execute<LineupStrategyRow>(sql`
+    SELECT
+      dl.strategy,
+      COUNT(*)::int AS "nLineups",
+      AVG(dl.proj_fpts) AS "avgProjFpts",
+      AVG(dl.actual_fpts) AS "avgActualFpts",
+      AVG(dl.leverage) AS "avgLeverage",
+      mode() WITHIN GROUP (ORDER BY dl.stack_team) AS "topStack"
+    FROM dk_lineups dl
+    WHERE dl.slate_id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
+    GROUP BY dl.strategy
+    ORDER BY AVG(dl.actual_fpts) DESC NULLS LAST, dl.strategy
+  `);
+  return result.rows;
 }
 
 export async function getLatestSlateInfo(): Promise<{ slateDate: string; gameCount: number | null } | null> {
