@@ -2,15 +2,21 @@
 
 Lineup structure: G / G / G / F / F / F / UTIL / UTIL  (8 players, $50k cap)
 
+Stacking strategy:
+  - Primary stack: >=3 players from the same team (configurable)
+  - Bring-back: >=1 player from the opponent in the same game (configurable)
+  - Win-prob filter: only allow primary stacks from teams with win_prob
+    in [stack_min_win_prob, stack_max_win_prob] (default 0.25-0.82)
+    This avoids stacking massive favorites with high blowout risk AND
+    avoids stacking 5% underdogs where a loss tanks all their value.
+
 Usage:
     python -m optimizer.lineup_optimizer \\
-        --entries C:/path/DKEntries.csv \\
-        --out C:/path/DKLineups_filled.csv \\
-        --n 100 --mode gpp --stack 2 --exposure 0.6
+        --entries DKEntries.csv --out DKLineups.csv \\
+        --n 100 --mode gpp --stack 3 --bring-back 1 --exposure 0.6
 
-Loads player pool from dk_players (most recent slate), generates N GPP lineups
-with exposure caps and team-stack constraints, then fills the DK multi-entry
-upload CSV.
+    # Wider win-prob window (include more teams as stackable):
+    python -m optimizer.lineup_optimizer ... --stack-min-prob 0.20 --stack-max-prob 0.90
 """
 
 from __future__ import annotations
@@ -20,12 +26,11 @@ import csv
 import io
 import logging
 import math
-import sys
 import time
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass
 
 import pulp
-from rapidfuzz import fuzz
 
 from config import load_config
 from db.database import DatabaseManager
@@ -40,6 +45,13 @@ G_SLOTS = ["G", "G2", "G3"]
 F_SLOTS = ["F", "F2", "F3"]
 UTIL_SLOTS = ["UTIL", "UTIL2"]
 
+# Default win-prob range for primary stacks.
+# Teams outside this range can still appear in lineups — they just can't be
+# the "stacked team" (z_T = 1). A 92% favorite risks blowout; a 5% underdog
+# risks elimination/low stats.
+DEFAULT_STACK_MIN_WIN_PROB = 0.25
+DEFAULT_STACK_MAX_WIN_PROB = 0.82
+
 
 # ── Data model ───────────────────────────────────────────────
 
@@ -50,8 +62,10 @@ class DkPlayer:
     dk_player_id: int
     name: str
     team_abbrev: str
+    game_key: str          # first token of game_info, e.g. "STL@MICH"
     eligible_positions: str
     salary: int
+    win_prob: float | None  # probability this player's team wins
     our_proj: float | None
     our_leverage: float | None
     linestar_proj: float | None
@@ -73,11 +87,7 @@ class Lineup:
     total_salary: int
     proj_fpts: float
     leverage: float
-
-    def __str__(self) -> str:
-        slot_order = G_SLOTS + F_SLOTS + UTIL_SLOTS
-        parts = [f"{s}: {self.slots[s].name} ({self.slots[s].team_abbrev})" for s in slot_order]
-        return f"[${self.total_salary:,} | proj={self.proj_fpts:.1f} | lev={self.leverage:.1f}] " + ", ".join(parts)
+    stack_team: str | None
 
 
 # ── Position assignment ──────────────────────────────────────
@@ -97,20 +107,38 @@ def assign_positions(players: list[DkPlayer]) -> dict[str, DkPlayer] | None:
                     assigned[slot] = remaining.pop(i)
                     break
 
-    # Pure-position players first (avoids locking G/F players into G slots
-    # when there's a shortage of pure-F players)
     fill(G_SLOTS, lambda p: p.is_g_eligible and not p.is_f_eligible)
     fill(F_SLOTS, lambda p: p.is_f_eligible and not p.is_g_eligible)
-    # Flex G/F fills remaining position slots
     fill(G_SLOTS, lambda p: p.is_g_eligible)
     fill(F_SLOTS, lambda p: p.is_f_eligible)
-    # UTIL gets whatever's left
     fill(UTIL_SLOTS, lambda _: True)
     fill(UTIL_SLOTS, lambda _: True)
 
     if len(assigned) != ROSTER_SIZE:
         return None
     return assigned
+
+
+# ── Game-pair helpers ────────────────────────────────────────
+
+
+def build_game_pairs(pool: list[DkPlayer]) -> dict[str, str]:
+    """Map each team_abbrev to its opponent's team_abbrev.
+
+    Parses game_key "AWAY@HOME" to extract the two teams, then builds a
+    bidirectional mapping: AWAY->HOME and HOME->AWAY.
+    """
+    game_teams: dict[str, list[str]] = defaultdict(list)
+    for p in pool:
+        if p.team_abbrev not in game_teams[p.game_key]:
+            game_teams[p.game_key].append(p.team_abbrev)
+
+    opponent: dict[str, str] = {}
+    for game_key, teams in game_teams.items():
+        if len(teams) == 2:
+            opponent[teams[0]] = teams[1]
+            opponent[teams[1]] = teams[0]
+    return opponent
 
 
 # ── ILP solver ──────────────────────────────────────────────
@@ -120,27 +148,48 @@ def solve_one(
     pool: list[DkPlayer],
     mode: str,
     min_stack: int,
+    bring_back: int,
+    stack_min_win_prob: float,
+    stack_max_win_prob: float,
     max_exposure: int,
     exposure_count: dict[int, int],
     previous: list[set[int]],
 ) -> Lineup | None:
-    """Solve one lineup via PuLP binary ILP. Returns None if infeasible."""
+    """Solve one lineup via PuLP binary ILP."""
 
-    # Teams with enough eligible players to stack
-    from collections import defaultdict
+    # Build opponent map for bring-back constraints
+    opponent_map = build_game_pairs(pool)
+
+    # Teams eligible to be the PRIMARY stack (within win-prob window)
     team_pool: dict[str, list[DkPlayer]] = defaultdict(list)
     for p in pool:
         team_pool[p.team_abbrev].append(p)
-    stackable = [t for t, ps in team_pool.items() if len(ps) >= min_stack]
+
+    # A team can be the primary stack if:
+    # 1. It has enough players in the eligible pool
+    # 2. Its win_prob is in the configured range (blowout protection)
+    def team_win_prob(team: str) -> float | None:
+        players = team_pool[team]
+        probs = [p.win_prob for p in players if p.win_prob is not None]
+        return sum(probs) / len(probs) if probs else None
+
+    stackable = []
+    for team, players in team_pool.items():
+        if len(players) < min_stack:
+            continue
+        wp = team_win_prob(team)
+        if wp is None or (stack_min_win_prob <= wp <= stack_max_win_prob):
+            stackable.append(team)
+
+    if not stackable:
+        # Fallback: allow all teams with enough players
+        stackable = [t for t, ps in team_pool.items() if len(ps) >= min_stack]
 
     prob = pulp.LpProblem("dk_cbb", pulp.LpMaximize)
 
-    # Binary variables for each player
     x = {p.id: pulp.LpVariable(f"x_{p.id}", cat="Binary") for p in pool}
-    # Binary stack-helper variables z_T (1 = team T is the stacked team)
     z = {t: pulp.LpVariable(f"z_{t}", cat="Binary") for t in stackable}
 
-    # Objective
     score_fn = (lambda p: p.our_leverage or 0) if mode == "gpp" else (lambda p: p.our_proj or 0)
     prob += pulp.lpSum(score_fn(p) * x[p.id] for p in pool)
 
@@ -150,26 +199,45 @@ def solve_one(
     prob += pulp.lpSum(x[p.id] for p in pool if p.is_g_eligible) >= MIN_G
     prob += pulp.lpSum(x[p.id] for p in pool if p.is_f_eligible) >= MIN_F
 
-    # Stack: at least one team must have >= min_stack players selected
+    # Primary stack: at least one team has >= min_stack players
     for t in stackable:
         team_players = [p for p in pool if p.team_abbrev == t]
-        prob += (pulp.lpSum(x[p.id] for p in team_players) - min_stack * z[t] >= 0,
-                 f"stack_{t}")
+        prob += (
+            pulp.lpSum(x[p.id] for p in team_players) - min_stack * z[t] >= 0,
+            f"stack_{t}",
+        )
     prob += pulp.lpSum(z[t] for t in stackable) >= 1
 
-    # Exposure cap: exclude over-exposed players
+    # Bring-back: if team T is primary stack, require >= bring_back players
+    # from T's opponent in the same game.
+    if bring_back > 0:
+        for t in stackable:
+            opp = opponent_map.get(t)
+            if not opp:
+                continue
+            opp_players = [p for p in pool if p.team_abbrev == opp]
+            if len(opp_players) < bring_back:
+                continue
+            # sum(opp_players selected) - bring_back * z_T >= 0
+            prob += (
+                pulp.lpSum(x[p.id] for p in opp_players) - bring_back * z[t] >= 0,
+                f"bringback_{t}",
+            )
+
+    # Exposure cap
     for p in pool:
         if exposure_count.get(p.id, 0) >= max_exposure:
             prob += x[p.id] == 0
 
-    # Diversity: at most ROSTER_SIZE-2 overlap with each previous lineup
+    # Diversity: at most ROSTER_SIZE-2 overlap with any previous lineup
     for i, prev_set in enumerate(previous):
         prev_players = [p for p in pool if p.id in prev_set]
-        prob += (pulp.lpSum(x[p.id] for p in prev_players) <= ROSTER_SIZE - 2,
-                 f"div_{i}")
+        prob += (
+            pulp.lpSum(x[p.id] for p in prev_players) <= ROSTER_SIZE - 2,
+            f"div_{i}",
+        )
 
-    # Solve (suppressed output)
-    status = prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=10))
+    status = prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=15))
     if pulp.LpStatus[prob.status] != "Optimal":
         return None
 
@@ -181,12 +249,20 @@ def solve_one(
     if slots is None:
         return None
 
+    # Identify the stacked team
+    stack_team = None
+    for t in stackable:
+        if pulp.value(z[t]) is not None and pulp.value(z[t]) > 0.5:
+            stack_team = t
+            break
+
     return Lineup(
         players=selected,
         slots=slots,
         total_salary=sum(p.salary for p in selected),
         proj_fpts=sum(p.our_proj or 0 for p in selected),
         leverage=sum(p.our_leverage or 0 for p in selected),
+        stack_team=stack_team,
     )
 
 
@@ -197,8 +273,11 @@ def optimize(
     pool: list[DkPlayer],
     n: int,
     mode: str = "gpp",
-    min_stack: int = 2,
+    min_stack: int = 3,
+    bring_back: int = 1,
     max_exposure_pct: float = 0.6,
+    stack_min_win_prob: float = DEFAULT_STACK_MIN_WIN_PROB,
+    stack_max_win_prob: float = DEFAULT_STACK_MAX_WIN_PROB,
 ) -> list[Lineup]:
     eligible = [
         p for p in pool
@@ -210,45 +289,100 @@ def optimize(
         print(f"ERROR: Only {len(eligible)} eligible players (need {ROSTER_SIZE})")
         return []
 
+    # Show which teams qualify for primary stacking
+    opponent_map = build_game_pairs(eligible)
+    team_pool: dict[str, list[DkPlayer]] = defaultdict(list)
+    for p in eligible:
+        team_pool[p.team_abbrev].append(p)
+
+    print(f"\n-- Stackable teams (win prob {stack_min_win_prob:.0%}-{stack_max_win_prob:.0%}) --")
+    any_stackable = False
+    for team, players in sorted(team_pool.items()):
+        if len(players) < min_stack:
+            continue
+        wp_vals = [p.win_prob for p in players if p.win_prob is not None]
+        wp = sum(wp_vals) / len(wp_vals) if wp_vals else None
+        in_range = wp is not None and stack_min_win_prob <= wp <= stack_max_win_prob
+        opp = opponent_map.get(team, "?")
+        marker = "  [PRIMARY]" if in_range else "  [skip - outside win-prob range]"
+        wp_str = f"{wp*100:.0f}%" if wp is not None else "N/A"
+        print(f"  {team:<8} vs {opp:<8}  win_prob={wp_str:<5}  n_eligible={len(players)}{marker}")
+        if in_range:
+            any_stackable = True
+
+    if not any_stackable:
+        print("  NOTE: No teams in win-prob range — allowing all teams as primary stacks")
+
+    print(f"\nGenerating {n} lineups from {len(eligible)} eligible players")
+    print(f"  mode={mode}, stack>={min_stack}, bring-back>={bring_back}, "
+          f"max_exp={max_exposure_pct:.0%}")
+
     max_exp_count = math.ceil(n * max_exposure_pct)
     exposure_count: dict[int, int] = {p.id: 0 for p in eligible}
     previous: list[set[int]] = []
     lineups: list[Lineup] = []
 
-    print(f"Generating {n} lineups from {len(eligible)} eligible players "
-          f"(mode={mode}, stack>={min_stack}, max_exp={max_exposure_pct:.0%})")
-
     t0 = time.time()
     for i in range(n):
-        lineup = solve_one(eligible, mode, min_stack, max_exp_count, exposure_count, previous)
+        lineup = solve_one(
+            eligible, mode, min_stack, bring_back,
+            stack_min_win_prob, stack_max_win_prob,
+            max_exp_count, exposure_count, previous,
+        )
         if lineup is None:
             print(f"  Stopped at lineup {i+1}: no more feasible lineups")
             break
         lineups.append(lineup)
-        prev_set = {p.id for p in lineup.players}
-        previous.append(prev_set)
+        previous.append({p.id for p in lineup.players})
         for p in lineup.players:
             exposure_count[p.id] = exposure_count.get(p.id, 0) + 1
 
-        elapsed = time.time() - t0
         if (i + 1) % 10 == 0:
-            print(f"  {i+1}/{n} lineups  ({elapsed:.1f}s)")
+            print(f"  {i+1}/{n} lineups  ({time.time() - t0:.1f}s)")
 
-    total = time.time() - t0
-    print(f"Generated {len(lineups)} lineups in {total:.1f}s")
+    print(f"Generated {len(lineups)} lineups in {time.time() - t0:.1f}s")
     return lineups
+
+
+# ── Reports ──────────────────────────────────────────────────
+
+
+def print_stack_report(lineups: list[Lineup]) -> None:
+    stack_counts: dict[str, int] = defaultdict(int)
+    for lu in lineups:
+        if lu.stack_team:
+            stack_counts[lu.stack_team] += 1
+
+    print(f"\n-- Stack distribution ({len(lineups)} lineups) --")
+    for team, cnt in sorted(stack_counts.items(), key=lambda x: -x[1]):
+        pct = 100 * cnt / len(lineups)
+        bar = "#" * int(pct / 2)
+        print(f"  {team:<8}  {cnt:>3} lineups  {pct:>5.1f}%  {bar}")
+
+
+def print_exposure_report(lineups: list[Lineup], pool: list[DkPlayer], top_n: int = 20) -> None:
+    counts: dict[int, int] = {}
+    for lu in lineups:
+        for p in lu.players:
+            counts[p.id] = counts.get(p.id, 0) + 1
+
+    player_map = {p.id: p for p in pool}
+    sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
+
+    print(f"\n-- Exposure Report (top {top_n}) --------------------------")
+    print(f"  {'Player':<28} {'Team':<8} {'Sal':>6}  {'Count':>5}  {'Exp%':>6}")
+    print("  " + "-" * 56)
+    for pid, cnt in sorted_counts[:top_n]:
+        p = player_map[pid]
+        pct = 100 * cnt / len(lineups)
+        print(f"  {p.name:<28} {p.team_abbrev:<8} ${p.salary}  {cnt:>5}  {pct:>5.1f}%")
 
 
 # ── DK multi-entry export ────────────────────────────────────
 
 
 def build_filled_csv(lineups: list[Lineup], entry_template_path: str) -> str:
-    """Fill DK multi-entry upload CSV with generated lineups.
-
-    DK format cols: Entry ID, Contest Name, Contest ID, Entry Fee, G, G, G, F, F, F, UTIL, UTIL
-    Player cell format: "Name (dkPlayerId)"
-    """
-    slot_order = G_SLOTS + F_SLOTS + UTIL_SLOTS  # 8 slots
+    slot_order = G_SLOTS + F_SLOTS + UTIL_SLOTS
 
     with open(entry_template_path, encoding="utf-8-sig") as f:
         reader = list(csv.reader(f))
@@ -258,9 +392,7 @@ def build_filled_csv(lineups: list[Lineup], entry_template_path: str) -> str:
 
     out_rows = [header]
     for i, lineup in enumerate(lineups):
-        # Reuse entry rows cyclically if more lineups than entries
         entry = list(entry_rows[i % len(entry_rows)]) if entry_rows else [""] * 12
-        # Pad if needed
         while len(entry) < 12:
             entry.append("")
         for j, slot in enumerate(slot_order):
@@ -274,24 +406,6 @@ def build_filled_csv(lineups: list[Lineup], entry_template_path: str) -> str:
     return buf.getvalue()
 
 
-def print_exposure_report(lineups: list[Lineup], pool: list[DkPlayer], top_n: int = 20) -> None:
-    counts: dict[int, int] = {}
-    for lu in lineups:
-        for p in lu.players:
-            counts[p.id] = counts.get(p.id, 0) + 1
-
-    player_map = {p.id: p for p in pool}
-    sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
-
-    print(f"\n-- Exposure Report (top {top_n}) --------------------------")
-    print(f"{'Player':<28} {'Team':<8} {'Sal':>6}  {'Count':>5}  {'Exp%':>6}")
-    print("-" * 60)
-    for pid, cnt in sorted_counts[:top_n]:
-        p = player_map[pid]
-        pct = 100 * cnt / len(lineups)
-        print(f"  {p.name:<26} {p.team_abbrev:<8} ${p.salary}  {cnt:>5}  {pct:>5.1f}%")
-
-
 # ── Main ─────────────────────────────────────────────────────
 
 
@@ -300,14 +414,16 @@ def run(
     out_path: str,
     n: int = 100,
     mode: str = "gpp",
-    min_stack: int = 2,
+    min_stack: int = 3,
+    bring_back: int = 1,
     max_exposure: float = 0.6,
+    stack_min_win_prob: float = DEFAULT_STACK_MIN_WIN_PROB,
+    stack_max_win_prob: float = DEFAULT_STACK_MAX_WIN_PROB,
     slate_date: str | None = None,
 ) -> None:
     config = load_config()
     db = DatabaseManager(config.database_url)
 
-    # Find target slate
     if slate_date:
         slate = db.execute_one(
             "SELECT id, slate_date FROM dk_slates WHERE slate_date = %s", (slate_date,)
@@ -321,14 +437,19 @@ def run(
         return
     print(f"Slate: {slate['slate_date']} (id={slate['id']})")
 
-    # Load players
     rows = db.execute(
         """
-        SELECT id, dk_player_id, name, team_abbrev, eligible_positions,
-               salary, our_proj, our_leverage, linestar_proj, proj_own_pct
-        FROM dk_players
-        WHERE slate_id = %s AND salary > 0
-        ORDER BY our_leverage DESC NULLS LAST
+        SELECT
+            dp.id, dp.dk_player_id, dp.name, dp.team_abbrev, dp.game_info,
+            dp.eligible_positions, dp.salary,
+            dp.our_proj, dp.our_leverage, dp.linestar_proj, dp.proj_own_pct,
+            CASE WHEN bm.team_a_id = dp.team_id THEN bm.model_prob_a
+                 WHEN bm.team_b_id = dp.team_id THEN 1 - bm.model_prob_a
+                 ELSE NULL END AS win_prob
+        FROM dk_players dp
+        LEFT JOIN bracket_matchups bm ON bm.id = dp.matchup_id
+        WHERE dp.slate_id = %s AND dp.salary > 0
+        ORDER BY dp.our_leverage DESC NULLS LAST
         """,
         (slate["id"],),
     )
@@ -339,8 +460,10 @@ def run(
             dk_player_id=r["dk_player_id"],
             name=r["name"],
             team_abbrev=r["team_abbrev"],
+            game_key=(r["game_info"] or "").split()[0],
             eligible_positions=r["eligible_positions"],
             salary=r["salary"],
+            win_prob=r["win_prob"],
             our_proj=r["our_proj"],
             our_leverage=r["our_leverage"],
             linestar_proj=r["linestar_proj"],
@@ -350,15 +473,17 @@ def run(
     ]
     print(f"Loaded {len(pool)} players from slate")
 
-    lineups = optimize(pool, n, mode, min_stack, max_exposure)
+    lineups = optimize(
+        pool, n, mode, min_stack, bring_back, max_exposure,
+        stack_min_win_prob, stack_max_win_prob,
+    )
     if not lineups:
         print("No lineups generated.")
         return
 
-    # Exposure report
+    print_stack_report(lineups)
     print_exposure_report(lineups, pool)
 
-    # Summary stats
     avg_sal = sum(lu.total_salary for lu in lineups) / len(lineups)
     avg_proj = sum(lu.proj_fpts for lu in lineups) / len(lineups)
     avg_lev = sum(lu.leverage for lu in lineups) / len(lineups)
@@ -368,7 +493,6 @@ def run(
     print(f"  Avg proj FPTS     : {avg_proj:.1f}")
     print(f"  Avg leverage score: {avg_lev:.1f}")
 
-    # Save filled CSV
     csv_content = build_filled_csv(lineups, entries_path)
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         f.write(csv_content)
@@ -380,10 +504,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate DK CBB lineups")
     parser.add_argument("--entries", required=True, help="DK multi-entry template CSV")
     parser.add_argument("--out", required=True, help="Output CSV path")
-    parser.add_argument("--n", type=int, default=100, help="Number of lineups")
+    parser.add_argument("--n", type=int, default=100)
     parser.add_argument("--mode", choices=["gpp", "cash"], default="gpp")
-    parser.add_argument("--stack", type=int, default=2, help="Min players from same team")
-    parser.add_argument("--exposure", type=float, default=0.6, help="Max exposure (0-1)")
-    parser.add_argument("--slate-date", help="Slate date YYYY-MM-DD (default: most recent)")
+    parser.add_argument("--stack", type=int, default=3, help="Min players from same team")
+    parser.add_argument("--bring-back", type=int, default=1,
+                        help="Min players from opponent of stacked team (0=disabled)")
+    parser.add_argument("--exposure", type=float, default=0.6)
+    parser.add_argument("--stack-min-prob", type=float, default=DEFAULT_STACK_MIN_WIN_PROB,
+                        help="Min win prob to allow as primary stack")
+    parser.add_argument("--stack-max-prob", type=float, default=DEFAULT_STACK_MAX_WIN_PROB,
+                        help="Max win prob to allow as primary stack (blowout filter)")
+    parser.add_argument("--slate-date")
     args = parser.parse_args()
-    run(args.entries, args.out, args.n, args.mode, args.stack, args.exposure, args.slate_date)
+    run(
+        args.entries, args.out, args.n, args.mode, args.stack,
+        args.bring_back, args.exposure,
+        args.stack_min_prob, args.stack_max_prob,
+        args.slate_date,
+    )
