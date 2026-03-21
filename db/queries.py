@@ -446,6 +446,82 @@ def get_simulation_results(db: DatabaseManager, season: int,
 
 # ── Public Picks ────────────────────────────────────────────
 
+# ── DFS Slates ──────────────────────────────────────────────
+
+def upsert_dk_slate(db: DatabaseManager, slate_date: str,
+                    game_count: int = 0) -> int:
+    """Insert or update a DFS slate, returning id."""
+    return db.execute_insert(
+        """
+        INSERT INTO dk_slates (slate_date, game_count)
+        VALUES (%s, %s)
+        ON CONFLICT (slate_date) DO UPDATE SET
+            game_count = GREATEST(dk_slates.game_count, EXCLUDED.game_count)
+        RETURNING id
+        """,
+        (slate_date, game_count),
+    )
+
+
+def upsert_dk_player(
+    db: DatabaseManager, slate_id: int, dk_player_id: int, name: str,
+    team_abbrev: str, eligible_positions: str, salary: int,
+    team_id: int = None, matchup_id: int = None, game_info: str = None,
+    avg_fpts_dk: float = None, linestar_proj: float = None,
+    proj_own_pct: float = None, our_proj: float = None,
+    our_leverage: float = None,
+) -> int:
+    """Insert or update a DFS player row."""
+    return db.execute_insert(
+        """
+        INSERT INTO dk_players (
+            slate_id, dk_player_id, name, team_abbrev, eligible_positions,
+            salary, team_id, matchup_id, game_info, avg_fpts_dk,
+            linestar_proj, proj_own_pct, our_proj, our_leverage
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (slate_id, dk_player_id) DO UPDATE SET
+            linestar_proj = COALESCE(EXCLUDED.linestar_proj, dk_players.linestar_proj),
+            proj_own_pct = COALESCE(EXCLUDED.proj_own_pct, dk_players.proj_own_pct),
+            our_proj = COALESCE(EXCLUDED.our_proj, dk_players.our_proj),
+            our_leverage = COALESCE(EXCLUDED.our_leverage, dk_players.our_leverage),
+            team_id = COALESCE(EXCLUDED.team_id, dk_players.team_id),
+            matchup_id = COALESCE(EXCLUDED.matchup_id, dk_players.matchup_id)
+        RETURNING id
+        """,
+        (slate_id, dk_player_id, name, team_abbrev, eligible_positions,
+         salary, team_id, matchup_id, game_info, avg_fpts_dk,
+         linestar_proj, proj_own_pct, our_proj, our_leverage),
+    )
+
+
+def get_dk_players(db: DatabaseManager, slate_id: int = None) -> list[dict]:
+    """Get DFS player pool for a slate (most recent if not specified)."""
+    if slate_id is None:
+        slate_row = db.execute_one(
+            "SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1"
+        )
+        if not slate_row:
+            return []
+        slate_id = slate_row["id"]
+    return db.execute(
+        """
+        SELECT dp.*,
+               t.name AS team_name, t.logo_url AS team_logo,
+               bm.model_prob_a, bm.vegas_prob_a,
+               bm.team_a_id AS matchup_team_a_id
+        FROM dk_players dp
+        LEFT JOIN teams t ON t.team_id = dp.team_id
+        LEFT JOIN bracket_matchups bm ON bm.id = dp.matchup_id
+        WHERE dp.slate_id = %s
+        ORDER BY dp.our_leverage DESC NULLS LAST, dp.our_proj DESC NULLS LAST
+        """,
+        (slate_id,),
+    )
+
+
+# ── Public Picks ────────────────────────────────────────────
+
 def upsert_public_pick(db: DatabaseManager, season: int, team_id: int,
                        round_name: str, pick_pct: float,
                        source: str = "espn") -> int:

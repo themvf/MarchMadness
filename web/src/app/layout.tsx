@@ -34,6 +34,7 @@ function Nav() {
     { href: "/bracket-builder", label: "Builder" },
     { href: "/war-room", label: "War Room" },
     { href: "/chalk-vs-chaos", label: "Chalk vs Chaos" },
+    { href: "/dfs", label: "DFS" },
   ];
 
   return (

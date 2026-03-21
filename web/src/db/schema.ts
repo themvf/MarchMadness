@@ -295,6 +295,37 @@ export const publicPicks = pgTable(
   ]
 );
 
+export const dkSlates = pgTable("dk_slates", {
+  id: serial("id").primaryKey(),
+  slateDate: date("slate_date").notNull().unique(),
+  gameCount: integer("game_count").default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const dkPlayers = pgTable(
+  "dk_players",
+  {
+    id: serial("id").primaryKey(),
+    slateId: integer("slate_id")
+      .notNull()
+      .references(() => dkSlates.id),
+    dkPlayerId: integer("dk_player_id").notNull(),
+    name: text("name").notNull(),
+    teamAbbrev: text("team_abbrev").notNull(),
+    teamId: integer("team_id").references(() => teams.teamId),
+    matchupId: integer("matchup_id"),
+    eligiblePositions: text("eligible_positions").notNull(),
+    salary: integer("salary").notNull(),
+    gameInfo: text("game_info"),
+    avgFptsDk: doublePrecision("avg_fpts_dk"),
+    linestarProj: doublePrecision("linestar_proj"),
+    projOwnPct: doublePrecision("proj_own_pct"),
+    ourProj: doublePrecision("our_proj"),
+    ourLeverage: doublePrecision("our_leverage"),
+  },
+  (t) => [unique("dk_players_slate_player_key").on(t.slateId, t.dkPlayerId)]
+);
+
 // Type inference
 export type Team = typeof teams.$inferSelect;
 export type TorvikRating = typeof torvikRatings.$inferSelect;
@@ -307,3 +338,5 @@ export type BracketMatchup = typeof bracketMatchups.$inferSelect;
 export type TeamNewsArticle = typeof teamNews.$inferSelect;
 export type OddsSnapshot = typeof oddsSnapshots.$inferSelect;
 export type PublicPick = typeof publicPicks.$inferSelect;
+export type DkSlate = typeof dkSlates.$inferSelect;
+export type DkPlayer = typeof dkPlayers.$inferSelect;

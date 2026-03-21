@@ -254,6 +254,39 @@ TABLES = [
         UNIQUE(season, team_id, round, model_version)
     )
     """,
+
+    # ── DFS slates ────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS dk_slates (
+        id SERIAL PRIMARY KEY,
+        slate_date DATE NOT NULL,
+        game_count INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(slate_date)
+    )
+    """,
+
+    # ── DFS player pool ───────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS dk_players (
+        id SERIAL PRIMARY KEY,
+        slate_id INTEGER NOT NULL REFERENCES dk_slates(id) ON DELETE CASCADE,
+        dk_player_id BIGINT NOT NULL,
+        name TEXT NOT NULL,
+        team_abbrev TEXT NOT NULL,
+        team_id INTEGER REFERENCES teams(team_id),
+        matchup_id INTEGER REFERENCES bracket_matchups(id),
+        eligible_positions TEXT NOT NULL,
+        salary INTEGER NOT NULL,
+        game_info TEXT,
+        avg_fpts_dk REAL,
+        linestar_proj REAL,
+        proj_own_pct REAL,
+        our_proj REAL,
+        our_leverage REAL,
+        UNIQUE(slate_id, dk_player_id)
+    )
+    """,
 ]
 
 INDEXES = [
@@ -277,4 +310,6 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_teams_torvik ON teams(torvik_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ncaa ON teams(ncaa_name)",
     "CREATE INDEX IF NOT EXISTS idx_teams_odds ON teams(odds_api_name)",
+    "CREATE INDEX IF NOT EXISTS idx_dk_players_slate ON dk_players(slate_id, our_leverage DESC NULLS LAST)",
+    "CREATE INDEX IF NOT EXISTS idx_dk_players_team ON dk_players(team_id, slate_id)",
 ]

@@ -1,6 +1,6 @@
 import { db } from ".";
-import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks, oddsSnapshots } from "./schema";
-import { eq, desc, asc, sql, and, or, gte } from "drizzle-orm";
+import { teams, torvikRatings, tournamentBracket, simulationResults, games, vegasOdds, playerStats, teamProfiles, bracketMatchups, publicPicks, oddsSnapshots, dkSlates, dkPlayers } from "./schema";
+import { eq, desc, asc, sql, and, or, gte, isNull } from "drizzle-orm";
 
 const CURRENT_SEASON = 2026;
 
@@ -844,4 +844,78 @@ export async function getBracketBuilderData(season = CURRENT_SEASON) {
     players: playersResult.rows,
     profiles,
   };
+}
+
+// ── DFS Player Pool ────────────────────────────────────────
+
+export type DkPlayerRow = {
+  id: number;
+  slateId: number;
+  dkPlayerId: number;
+  name: string;
+  teamAbbrev: string;
+  teamId: number | null;
+  matchupId: number | null;
+  eligiblePositions: string;
+  salary: number;
+  gameInfo: string | null;
+  avgFptsDk: number | null;
+  linestarProj: number | null;
+  projOwnPct: number | null;
+  ourProj: number | null;
+  ourLeverage: number | null;
+  // Joined fields
+  teamName: string | null;
+  teamLogo: string | null;
+  modelProbA: number | null;
+  vegasProbA: number | null;
+  matchupTeamAId: number | null;
+  slateDate: string | null;
+};
+
+export async function getDkPlayers(
+  season = CURRENT_SEASON
+): Promise<DkPlayerRow[]> {
+  const result = await db.execute<DkPlayerRow>(sql`
+    SELECT
+      dp.id,
+      dp.slate_id as "slateId",
+      dp.dk_player_id as "dkPlayerId",
+      dp.name,
+      dp.team_abbrev as "teamAbbrev",
+      dp.team_id as "teamId",
+      dp.matchup_id as "matchupId",
+      dp.eligible_positions as "eligiblePositions",
+      dp.salary,
+      dp.game_info as "gameInfo",
+      dp.avg_fpts_dk as "avgFptsDk",
+      dp.linestar_proj as "linestarProj",
+      dp.proj_own_pct as "projOwnPct",
+      dp.our_proj as "ourProj",
+      dp.our_leverage as "ourLeverage",
+      t.name as "teamName",
+      t.logo_url as "teamLogo",
+      bm.model_prob_a as "modelProbA",
+      bm.vegas_prob_a as "vegasProbA",
+      bm.team_a_id as "matchupTeamAId",
+      ds.slate_date as "slateDate"
+    FROM dk_players dp
+    INNER JOIN dk_slates ds ON ds.id = dp.slate_id
+    LEFT JOIN teams t ON t.team_id = dp.team_id
+    LEFT JOIN bracket_matchups bm ON bm.id = dp.matchup_id
+    WHERE ds.id = (
+      SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1
+    )
+    ORDER BY dp.our_leverage DESC NULLS LAST, dp.our_proj DESC NULLS LAST
+  `);
+  return result.rows;
+}
+
+export async function getLatestSlateInfo(): Promise<{ slateDate: string; gameCount: number | null } | null> {
+  const result = await db
+    .select({ slateDate: dkSlates.slateDate, gameCount: dkSlates.gameCount })
+    .from(dkSlates)
+    .orderBy(desc(dkSlates.slateDate))
+    .limit(1);
+  return result[0] ?? null;
 }

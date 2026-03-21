@@ -1,0 +1,449 @@
+"use server";
+
+/**
+ * Server actions for the DFS optimizer page.
+ *
+ * processDkSlate  — parse DK CSV + LineStar CSV, compute projections, save to DB
+ * runOptimizer    — run ILP optimizer with given settings, return lineups
+ * exportLineups   — build multi-entry upload CSV string
+ */
+
+import { revalidatePath } from "next/cache";
+import { db } from "@/db";
+import {
+  dkSlates,
+  dkPlayers,
+  teams,
+  torvikRatings,
+  bracketMatchups,
+  playerStats,
+} from "@/db/schema";
+import { eq, sql, isNull, and, or } from "drizzle-orm";
+import { optimizeLineups, buildMultiEntryCSV } from "./optimizer";
+import type { OptimizerPlayer, OptimizerSettings, GeneratedLineup } from "./optimizer";
+
+const CURRENT_SEASON = 2026;
+const LEAGUE_AVG_TEMPO = 68.5;
+const LEAGUE_AVG_ADJE = 100.0;
+
+// ── CSV Parsers ──────────────────────────────────────────────
+
+function parseDkCsv(content: string): Array<{
+  name: string;
+  dkId: number;
+  teamAbbrev: string;
+  eligiblePositions: string;
+  salary: number;
+  gameInfo: string;
+  avgFptsDk: number | null;
+}> {
+  const lines = content.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
+  const col = (name: string) => header.findIndex((h) => h === name);
+
+  const nameCol = col("Name");
+  const idCol = col("ID");
+  const salaryCol = col("Salary");
+  const rosterPosCol = col("Roster Position");
+  const teamCol = col("TeamAbbrev");
+  const gameInfoCol = col("Game Info");
+  const avgCol = col("AvgPointsPerGame");
+
+  const players = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = lines[i].split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+    const name = cells[nameCol] ?? "";
+    const idStr = cells[idCol] ?? "";
+    if (!name || !idStr) continue;
+    const salaryStr = (cells[salaryCol] ?? "0").replace(/[^0-9]/g, "");
+    players.push({
+      name,
+      dkId: parseInt(idStr, 10),
+      teamAbbrev: (cells[teamCol] ?? "").toUpperCase(),
+      eligiblePositions: cells[rosterPosCol] ?? "UTIL",
+      salary: parseInt(salaryStr, 10) || 0,
+      gameInfo: cells[gameInfoCol] ?? "",
+      avgFptsDk: parseFloat(cells[avgCol] ?? "") || null,
+    });
+  }
+  return players;
+}
+
+function parseLinestarCsv(content: string): Map<string, { linestarProj: number; projOwnPct: number }> {
+  const lines = content.split(/\r?\n/).filter(Boolean);
+  // Skip header row; columns: Pos, Team, Player, Salary, projOwn%, actualOwn%, Diff, Proj
+  const map = new Map<string, { linestarProj: number; projOwnPct: number }>();
+  for (let i = 1; i < lines.length; i++) {
+    const cells = lines[i].split(",").map((c) => c.trim());
+    if (cells.length < 8) continue;
+    const playerName = cells[2] ?? "";
+    const salaryStr = (cells[3] ?? "").replace(/[^0-9]/g, "");
+    const projOwnStr = (cells[4] ?? "").replace("%", "");
+    const projStr = cells[7] ?? "";
+    if (!playerName) continue;
+    const proj = parseFloat(projStr) || 0;
+    const projOwn = parseFloat(projOwnStr) || 0;
+    if (proj === 0 && projOwn === 0) continue; // true DNP
+    const salary = parseInt(salaryStr, 10) || 0;
+    // Key: "name_lower|salary" — allows salary-confirmed fuzzy match
+    map.set(`${playerName.toLowerCase()}|${salary}`, { linestarProj: proj, projOwnPct: projOwn });
+  }
+  return map;
+}
+
+// Simple Levenshtein for fuzzy name matching
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+function findLinestarMatch(
+  name: string,
+  salary: number,
+  map: Map<string, { linestarProj: number; projOwnPct: number }>
+) {
+  // Exact match first
+  const exact = map.get(`${name.toLowerCase()}|${salary}`);
+  if (exact) return exact;
+  // Fuzzy: find best name match with same salary
+  let best: { linestarProj: number; projOwnPct: number } | null = null;
+  let bestDist = 4; // max edit distance threshold
+  for (const [key, val] of map.entries()) {
+    const [lsName, lsSalStr] = key.split("|");
+    if (parseInt(lsSalStr, 10) !== salary) continue;
+    const dist = levenshtein(name.toLowerCase(), lsName);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = val;
+    }
+  }
+  return best;
+}
+
+// Match DK team abbreviation to team_id
+const DK_OVERRIDES: Record<string, string> = {
+  DUKE: "Duke", TCU: "TCU", KU: "Kansas", KSAS: "Kansas",
+  STJ: "St. John's (NY)", STJN: "St. John's (NY)", STJS: "St. John's (NY)",
+  CONN: "Connecticut", CCONN: "Connecticut", UCONN: "Connecticut",
+  "MICH ST": "Michigan State", MSU: "Michigan State",
+  LOU: "Louisville", UCLA: "UCLA", TTU: "Texas Tech",
+  SLU: "Saint Louis", SNTLS: "Saint Louis",
+  UVA: "Virginia", VIRG: "Virginia",
+  ISU: "Iowa State", "IOWA ST": "Iowa State",
+  UK: "Kentucky", VAN: "Vanderbilt", IOWA: "Iowa",
+  NEB: "Nebraska", VCU: "VCU", ILL: "Illinois",
+  TXAM: "Texas A&M", "TA&M": "Texas A&M",
+  AZ: "Arizona", HOU: "Houston",
+  UTST: "Utah State", USU: "Utah State",
+  HPT: "High Point", "HIGH PT": "High Point",
+  GONZ: "Gonzaga", ARK: "Arkansas", PUR: "Purdue",
+  MIA: "Miami FL", MIAF: "Miami FL", MIAFL: "Miami FL",
+  ALA: "Alabama",
+};
+
+function matchTeamId(abbrev: string, teamCache: Map<string, number>): number | null {
+  const up = abbrev.toUpperCase().trim();
+  const override = DK_OVERRIDES[up];
+  if (override) {
+    const id = teamCache.get(override.toLowerCase());
+    if (id) return id;
+  }
+  const direct = teamCache.get(up.toLowerCase());
+  if (direct) return direct;
+  // Prefix match: "DUKE" matches "duke"
+  for (const [key, id] of teamCache.entries()) {
+    if (key.startsWith(up.toLowerCase()) || up.toLowerCase().startsWith(key.substring(0, 4))) {
+      return id;
+    }
+  }
+  return null;
+}
+
+// ── Projection helpers ───────────────────────────────────────
+
+function computeOurProjection(
+  player: { minPct: number | null; usageRate: number | null; ppg: number | null; rpg: number | null; apg: number | null; stlPct: number | null; blkPct: number | null; tovPct: number | null },
+  teamTempo: number,
+  oppTempo: number,
+  oppDe: number,
+  winProb: number
+): number | null {
+  const minPct = player.minPct ?? 0;
+  if (minPct < 5) return null;
+  const avgMinutes = (minPct * 40) / 100;
+  if (avgMinutes <= 0) return null;
+
+  const gameTempo = (teamTempo + oppTempo) / 2;
+  const paceFactor = gameTempo / LEAGUE_AVG_TEMPO;
+  const defFactor = LEAGUE_AVG_ADJE / (oppDe || LEAGUE_AVG_ADJE);
+  const blowoutFactor = 1.0 - Math.max(0, (winProb - 0.75) * 0.5);
+  const projMinutes = avgMinutes * blowoutFactor;
+
+  const ppg = player.ppg ?? 0;
+  const rpg = player.rpg ?? 0;
+  const apg = player.apg ?? 0;
+  const stlPct = player.stlPct ?? 0;
+  const blkPct = player.blkPct ?? 0;
+  const tovPct = player.tovPct ?? 0;
+  const usage = player.usageRate ?? 20;
+
+  const projPts = (ppg / avgMinutes) * projMinutes * defFactor;
+  const projReb = (rpg / avgMinutes) * projMinutes * paceFactor;
+  const projAst = (apg / avgMinutes) * projMinutes * defFactor;
+  const teamPoss = gameTempo * 2;
+  const projStl = (stlPct / 100) * teamPoss * (projMinutes / 40);
+  const projBlk = (blkPct / 100) * teamPoss * (projMinutes / 40);
+  const playerPoss = teamPoss * (usage / 100);
+  const projTov = (tovPct / 100) * playerPoss * (projMinutes / 40);
+
+  return Math.round((projPts * 1.0 + projReb * 1.25 + projAst * 1.5 + projStl * 2.0 + projBlk * 2.0 - projTov * 0.5) * 100) / 100;
+}
+
+function computeLeverage(
+  ourProj: number,
+  projOwnPct: number,
+  ourWinProb: number | null,
+  vegasWinProb: number | null,
+  contrarianFactor = 0.7
+): number {
+  const ownFraction = Math.max(0, Math.min(1, projOwnPct / 100));
+  let base = ourProj * Math.pow(1 - ownFraction, contrarianFactor);
+  if (ourWinProb != null && vegasWinProb != null && vegasWinProb > 0) {
+    const edge = Math.max(0, ourWinProb - vegasWinProb);
+    base *= 1 + edge * 2;
+  }
+  return Math.round(base * 1000) / 1000;
+}
+
+// ── Main server actions ──────────────────────────────────────
+
+export async function processDkSlate(formData: FormData): Promise<{ success: boolean; message: string }> {
+  const dkCsv = formData.get("dkCsv") as string | null;
+  const linestarCsv = formData.get("linestarCsv") as string | null;
+
+  if (!dkCsv || !linestarCsv) {
+    return { success: false, message: "Both DK CSV and LineStar CSV are required." };
+  }
+
+  try {
+    const dkPlayerList = parseDkCsv(dkCsv);
+    const linestarMap = parseLinestarCsv(linestarCsv);
+
+    if (dkPlayerList.length === 0) {
+      return { success: false, message: "Could not parse any players from DK CSV." };
+    }
+
+    // Determine slate date from first game_info
+    let slateDate = new Date().toISOString().slice(0, 10);
+    for (const p of dkPlayerList) {
+      const m = p.gameInfo.match(/(\d{2}\/\d{2}\/\d{4})/);
+      if (m) {
+        const [mm, dd, yyyy] = m[1].split("/");
+        slateDate = `${yyyy}-${mm}-${dd}`;
+        break;
+      }
+    }
+
+    const gameKeys = new Set(dkPlayerList.map((p) => p.gameInfo.split(" ")[0]).filter(Boolean));
+
+    // Upsert slate
+    const [slateRow] = await db
+      .insert(dkSlates)
+      .values({ slateDate, gameCount: gameKeys.size })
+      .onConflictDoUpdate({
+        target: dkSlates.slateDate,
+        set: { gameCount: gameKeys.size },
+      })
+      .returning({ id: dkSlates.id });
+    const slateId = slateRow.id;
+
+    // Load DB context: teams, ratings, matchups, player stats
+    const allTeams = await db
+      .select({ teamId: teams.teamId, name: teams.name, torvikName: teams.torvikName, ncaaName: teams.ncaaName, shortName: teams.shortName })
+      .from(teams);
+
+    const teamCache = new Map<string, number>();
+    for (const t of allTeams) {
+      for (const n of [t.name, t.torvikName, t.ncaaName, t.shortName]) {
+        if (n) teamCache.set(n.toLowerCase(), t.teamId);
+      }
+    }
+
+    const allRatings = await db
+      .select({ teamId: torvikRatings.teamId, adjTempo: torvikRatings.adjTempo, adjDe: torvikRatings.adjDe })
+      .from(torvikRatings)
+      .where(eq(torvikRatings.season, CURRENT_SEASON));
+    const ratingsMap = new Map(allRatings.map((r) => [r.teamId, r]));
+
+    const activeMatchups = await db
+      .select({
+        id: bracketMatchups.id,
+        teamAId: bracketMatchups.teamAId,
+        teamBId: bracketMatchups.teamBId,
+        modelProbA: bracketMatchups.modelProbA,
+        vegasProbA: bracketMatchups.vegasProbA,
+      })
+      .from(bracketMatchups)
+      .where(and(eq(bracketMatchups.season, CURRENT_SEASON), isNull(bracketMatchups.winnerId)));
+
+    const matchupByTeam = new Map<number, (typeof activeMatchups)[0]>();
+    for (const m of activeMatchups) {
+      matchupByTeam.set(m.teamAId, m);
+      matchupByTeam.set(m.teamBId, m);
+    }
+
+    type PlayerStatRecord = {
+      name: string; teamId: number; minPct: number | null; usageRate: number | null;
+      ppg: number | null; rpg: number | null; apg: number | null;
+      stlPct: number | null; blkPct: number | null; tovPct: number | null;
+    };
+
+    const tournamentTeamIds = [...new Set(activeMatchups.flatMap((m) => [m.teamAId, m.teamBId]))];
+    const allPlayerStats: PlayerStatRecord[] = tournamentTeamIds.length > 0
+      ? (await db.execute<PlayerStatRecord>(sql`
+          SELECT name, team_id as "teamId", min_pct as "minPct", usage_rate as "usageRate",
+                 ppg, rpg, apg, stl_pct as "stlPct", blk_pct as "blkPct", tov_pct as "tovPct"
+          FROM player_stats
+          WHERE season = ${CURRENT_SEASON}
+            AND team_id IN (${sql.join(tournamentTeamIds.map((id) => sql`${id}`), sql`, `)})
+        `)).rows
+      : [];
+
+    const statsByTeam = new Map<number, PlayerStatRecord[]>();
+    for (const ps of allPlayerStats) {
+      if (!statsByTeam.has(ps.teamId)) statsByTeam.set(ps.teamId, []);
+      statsByTeam.get(ps.teamId)!.push(ps);
+    }
+
+    // Process each DK player
+    for (const p of dkPlayerList) {
+      const ls = findLinestarMatch(p.name, p.salary, linestarMap);
+      const teamId = matchTeamId(p.teamAbbrev, teamCache);
+      const matchup = teamId ? matchupByTeam.get(teamId) : null;
+
+      let winProb: number | null = null;
+      let vegasWinProb: number | null = null;
+      if (matchup && teamId) {
+        winProb = matchup.teamAId === teamId ? matchup.modelProbA : (matchup.modelProbA != null ? 1 - matchup.modelProbA : null);
+        vegasWinProb = matchup.teamAId === teamId ? matchup.vegasProbA : (matchup.vegasProbA != null ? 1 - matchup.vegasProbA : null);
+      }
+
+      // Fuzzy-match player stats within same team
+      let matchedStats: PlayerStatRecord | null = null;
+      if (teamId) {
+        const candidates = statsByTeam.get(teamId) ?? [];
+        let bestDist = 5;
+        for (const ps of candidates) {
+          const dist = levenshtein(p.name.toLowerCase(), ps.name.toLowerCase());
+          if (dist < bestDist) {
+            bestDist = dist;
+            matchedStats = ps;
+          }
+        }
+      }
+
+      let ourProj: number | null = null;
+      if (matchedStats && teamId && matchup && winProb != null) {
+        const oppId = matchup.teamAId === teamId ? matchup.teamBId : matchup.teamAId;
+        const teamR = ratingsMap.get(teamId);
+        const oppR = ratingsMap.get(oppId);
+        ourProj = computeOurProjection(
+          matchedStats,
+          teamR?.adjTempo ?? LEAGUE_AVG_TEMPO,
+          oppR?.adjTempo ?? LEAGUE_AVG_TEMPO,
+          oppR?.adjDe ?? LEAGUE_AVG_ADJE,
+          winProb
+        );
+      }
+
+      const ourLeverage = (ourProj != null && ls?.projOwnPct != null)
+        ? computeLeverage(ourProj, ls.projOwnPct, winProb, vegasWinProb)
+        : null;
+
+      await db
+        .insert(dkPlayers)
+        .values({
+          slateId,
+          dkPlayerId: p.dkId,
+          name: p.name,
+          teamAbbrev: p.teamAbbrev,
+          eligiblePositions: p.eligiblePositions,
+          salary: p.salary,
+          teamId: teamId ?? undefined,
+          matchupId: matchup?.id ?? undefined,
+          gameInfo: p.gameInfo,
+          avgFptsDk: p.avgFptsDk,
+          linestarProj: ls?.linestarProj ?? null,
+          projOwnPct: ls?.projOwnPct ?? null,
+          ourProj,
+          ourLeverage,
+        })
+        .onConflictDoUpdate({
+          target: [dkPlayers.slateId, dkPlayers.dkPlayerId],
+          set: {
+            linestarProj: ls?.linestarProj ?? undefined,
+            projOwnPct: ls?.projOwnPct ?? undefined,
+            ourProj: ourProj ?? undefined,
+            ourLeverage: ourLeverage ?? undefined,
+            teamId: teamId ?? undefined,
+            matchupId: matchup?.id ?? undefined,
+          },
+        });
+    }
+
+    revalidatePath("/dfs");
+    return { success: true, message: `Loaded ${dkPlayerList.length} players for ${slateDate}` };
+  } catch (err) {
+    console.error("processDkSlate error:", err);
+    return { success: false, message: String(err) };
+  }
+}
+
+export async function runOptimizer(
+  playerIds: number[],  // subset of dk_player ids (game-filtered)
+  settings: OptimizerSettings
+): Promise<GeneratedLineup[]> {
+  if (playerIds.length === 0) return [];
+
+  const rows = await db.execute<{
+    id: number; dkPlayerId: number; name: string; teamAbbrev: string;
+    teamId: number | null; matchupId: number | null; eligiblePositions: string;
+    salary: number; ourProj: number | null; ourLeverage: number | null;
+    linestarProj: number | null; projOwnPct: number | null; gameInfo: string | null;
+    teamLogo: string | null; teamName: string | null;
+  }>(sql`
+    SELECT dp.id, dp.dk_player_id as "dkPlayerId", dp.name, dp.team_abbrev as "teamAbbrev",
+           dp.team_id as "teamId", dp.matchup_id as "matchupId",
+           dp.eligible_positions as "eligiblePositions", dp.salary,
+           dp.our_proj as "ourProj", dp.our_leverage as "ourLeverage",
+           dp.linestar_proj as "linestarProj", dp.proj_own_pct as "projOwnPct",
+           dp.game_info as "gameInfo",
+           t.logo_url as "teamLogo", t.name as "teamName"
+    FROM dk_players dp
+    LEFT JOIN teams t ON t.team_id = dp.team_id
+    WHERE dp.id IN (${sql.join(playerIds.map((id) => sql`${id}`), sql`, `)})
+  `);
+
+  const pool = rows.rows as OptimizerPlayer[];
+  return optimizeLineups(pool, settings);
+}
+
+export async function exportLineups(
+  lineups: GeneratedLineup[],
+  entryTemplateCsv: string
+): Promise<string> {
+  const lines = entryTemplateCsv.split(/\r?\n/).filter(Boolean);
+  return buildMultiEntryCSV(lineups, lines);
+}
