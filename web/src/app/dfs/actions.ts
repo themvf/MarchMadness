@@ -440,6 +440,60 @@ export async function runOptimizer(
   return optimizeLineups(pool, settings);
 }
 
+/**
+ * Re-parse a fresh LineStar CSV and update linestar_proj + proj_own_pct + our_leverage
+ * for all players on the most recent slate. DK salary data is unchanged.
+ */
+export async function refreshLinestarProjs(
+  formData: FormData
+): Promise<{ success: boolean; message: string }> {
+  const linestarCsv = formData.get("linestarCsv") as string | null;
+  if (!linestarCsv) return { success: false, message: "LineStar CSV is required." };
+
+  try {
+    const linestarMap = parseLinestarCsv(linestarCsv);
+    if (linestarMap.size === 0) {
+      return { success: false, message: "Could not parse any players from LineStar CSV." };
+    }
+
+    // Fetch the most recent slate's players (with win probs for leverage recalc)
+    const rows = await db.execute<{
+      id: number; name: string; salary: number;
+      ourProj: number | null; winProb: number | null; vegasWinProb: number | null;
+    }>(sql`
+      SELECT dp.id, dp.name, dp.salary, dp.our_proj as "ourProj",
+             CASE WHEN bm.team_a_id = dp.team_id THEN bm.model_prob_a
+                  ELSE 1 - bm.model_prob_a END as "winProb",
+             CASE WHEN bm.team_a_id = dp.team_id THEN bm.vegas_prob_a
+                  ELSE 1 - bm.vegas_prob_a END as "vegasWinProb"
+      FROM dk_players dp
+      LEFT JOIN bracket_matchups bm ON bm.id = dp.matchup_id
+      WHERE dp.slate_id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
+    `);
+
+    let updated = 0;
+    for (const row of rows.rows) {
+      const ls = findLinestarMatch(row.name, row.salary, linestarMap);
+      if (!ls) continue;
+      const ourLeverage =
+        row.ourProj != null
+          ? computeLeverage(row.ourProj, ls.projOwnPct, row.winProb ?? null, row.vegasWinProb ?? null)
+          : null;
+      await db
+        .update(dkPlayers)
+        .set({ linestarProj: ls.linestarProj, projOwnPct: ls.projOwnPct, ourLeverage })
+        .where(eq(dkPlayers.id, row.id));
+      updated++;
+    }
+
+    revalidatePath("/dfs");
+    return { success: true, message: `Updated ${updated} / ${rows.rows.length} players from LineStar.` };
+  } catch (err) {
+    console.error("refreshLinestarProjs error:", err);
+    return { success: false, message: String(err) };
+  }
+}
+
 export async function exportLineups(
   lineups: GeneratedLineup[],
   entryTemplateCsv: string

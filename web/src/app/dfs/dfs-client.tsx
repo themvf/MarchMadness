@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { DkPlayerRow } from "@/db/queries";
 import type { GeneratedLineup, OptimizerSettings } from "./optimizer";
-import { processDkSlate, runOptimizer, exportLineups } from "./actions";
+import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups } from "./actions";
 
 type Props = {
   players: DkPlayerRow[];
@@ -52,7 +52,8 @@ export default function DfsClient({ players, slateDate }: Props) {
   const [isPending, startTransition] = useTransition();
 
   // ── Upload state ─────────────────────────────────────────
-  const [uploadMsg, setUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [dkUploadMsg, setDkUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [lsUploadMsg, setLsUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const dkFileRef = useRef<HTMLInputElement>(null);
   const lsFileRef = useRef<HTMLInputElement>(null);
 
@@ -185,11 +186,11 @@ export default function DfsClient({ players, slateDate }: Props) {
 
   // ── Handlers ─────────────────────────────────────────────
 
-  const handleUpload = async () => {
+  const handleDkUpload = async () => {
     const dkFile = dkFileRef.current?.files?.[0];
     const lsFile = lsFileRef.current?.files?.[0];
     if (!dkFile || !lsFile) {
-      setUploadMsg({ ok: false, text: "Select both DK CSV and LineStar CSV first." });
+      setDkUploadMsg({ ok: false, text: "Select both DK CSV and LineStar CSV to load a new slate." });
       return;
     }
     const dkText = await dkFile.text();
@@ -197,10 +198,24 @@ export default function DfsClient({ players, slateDate }: Props) {
     const form = new FormData();
     form.set("dkCsv", dkText);
     form.set("linestarCsv", lsText);
-
     startTransition(async () => {
       const res = await processDkSlate(form);
-      setUploadMsg({ ok: res.success, text: res.message });
+      setDkUploadMsg({ ok: res.success, text: res.message });
+    });
+  };
+
+  const handleLsRefresh = async () => {
+    const lsFile = lsFileRef.current?.files?.[0];
+    if (!lsFile) {
+      setLsUploadMsg({ ok: false, text: "Select a LineStar CSV first." });
+      return;
+    }
+    const lsText = await lsFile.text();
+    const form = new FormData();
+    form.set("linestarCsv", lsText);
+    startTransition(async () => {
+      const res = await refreshLinestarProjs(form);
+      setLsUploadMsg({ ok: res.success, text: res.message });
     });
   };
 
@@ -277,17 +292,20 @@ export default function DfsClient({ players, slateDate }: Props) {
           <CardHeader>
             <CardTitle className="text-base">Load Your Slate</CardTitle>
             <CardDescription>
-              Upload DraftKings salary CSV + LineStar projections CSV to generate the player pool.
-              Or run <code className="font-mono text-xs">python -m ingest.dk_slate --dk DKSalaries.csv --linestar LineStar.csv</code> to load via CLI.
+              Upload both CSVs to create the player pool, or run{" "}
+              <code className="font-mono text-xs">python -m ingest.dk_slate --dk DKSalaries.csv --linestar LineStar.csv</code> via CLI.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <UploadPanel
+          <CardContent>
+            <SplitUploadPanel
               dkFileRef={dkFileRef}
               lsFileRef={lsFileRef}
-              onUpload={handleUpload}
+              onLoadSlate={handleDkUpload}
+              onRefreshLineStar={handleLsRefresh}
               isPending={isPending}
-              message={uploadMsg}
+              dkMessage={dkUploadMsg}
+              lsMessage={lsUploadMsg}
+              hasSlate={false}
             />
           </CardContent>
         </Card>
@@ -312,14 +330,18 @@ export default function DfsClient({ players, slateDate }: Props) {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium">Update Slate</CardTitle>
+          <CardDescription>Refresh LineStar ownership as projections update throughout the day.</CardDescription>
         </CardHeader>
         <CardContent>
-          <UploadPanel
+          <SplitUploadPanel
             dkFileRef={dkFileRef}
             lsFileRef={lsFileRef}
-            onUpload={handleUpload}
+            onLoadSlate={handleDkUpload}
+            onRefreshLineStar={handleLsRefresh}
             isPending={isPending}
-            message={uploadMsg}
+            dkMessage={dkUploadMsg}
+            lsMessage={lsUploadMsg}
+            hasSlate={true}
           />
         </CardContent>
       </Card>
@@ -594,49 +616,68 @@ export default function DfsClient({ players, slateDate }: Props) {
 
 // ── Sub-components ────────────────────────────────────────────
 
-function UploadPanel({
+function SplitUploadPanel({
   dkFileRef,
   lsFileRef,
-  onUpload,
+  onLoadSlate,
+  onRefreshLineStar,
   isPending,
-  message,
+  dkMessage,
+  lsMessage,
+  hasSlate,
 }: {
   dkFileRef: React.RefObject<HTMLInputElement | null>;
   lsFileRef: React.RefObject<HTMLInputElement | null>;
-  onUpload: () => void;
+  onLoadSlate: () => void;
+  onRefreshLineStar: () => void;
   isPending: boolean;
-  message: { ok: boolean; text: string } | null;
+  dkMessage: { ok: boolean; text: string } | null;
+  lsMessage: { ok: boolean; text: string } | null;
+  hasSlate: boolean;
 }) {
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-3">
-        <div>
-          <p className="mb-1 text-xs text-muted-foreground">DK Salary CSV</p>
-          <input
-            ref={dkFileRef}
-            type="file"
-            accept=".csv"
-            className="text-xs"
-          />
-        </div>
-        <div>
-          <p className="mb-1 text-xs text-muted-foreground">LineStar CSV</p>
-          <input
-            ref={lsFileRef}
-            type="file"
-            accept=".csv"
-            className="text-xs"
-          />
-        </div>
-      </div>
-      <Button size="sm" onClick={onUpload} disabled={isPending}>
-        {isPending ? "Processing…" : "Upload & Process"}
-      </Button>
-      {message && (
-        <p className={`text-xs ${message.ok ? "text-green-600" : "text-red-500"}`}>
-          {message.text}
+    <div className="grid gap-4 sm:grid-cols-2">
+      {/* DK Salaries — load full slate */}
+      <div className="space-y-2 rounded-lg border p-3">
+        <p className="text-xs font-medium">
+          DK Salary CSV
+          <span className="ml-1 text-muted-foreground font-normal">— load new slate</span>
         </p>
-      )}
+        <input ref={dkFileRef} type="file" accept=".csv" className="text-xs" />
+        {!hasSlate && (
+          <>
+            <p className="text-[11px] text-muted-foreground">Also select LineStar CSV →</p>
+          </>
+        )}
+        <Button size="sm" onClick={onLoadSlate} disabled={isPending}>
+          {isPending ? "Processing…" : "Load Slate"}
+        </Button>
+        {dkMessage && (
+          <p className={`text-xs ${dkMessage.ok ? "text-green-600" : "text-red-500"}`}>
+            {dkMessage.text}
+          </p>
+        )}
+      </div>
+
+      {/* LineStar — refresh ownership only */}
+      <div className="space-y-2 rounded-lg border p-3">
+        <p className="text-xs font-medium">
+          LineStar CSV
+          <span className="ml-1 text-muted-foreground font-normal">— refresh ownership %</span>
+        </p>
+        <input ref={lsFileRef} type="file" accept=".csv" className="text-xs" />
+        <p className="text-[11px] text-muted-foreground">
+          Updates projections + ownership on existing slate. Use as ownership updates throughout the day.
+        </p>
+        <Button size="sm" variant="outline" onClick={onRefreshLineStar} disabled={isPending}>
+          {isPending ? "Refreshing…" : "Refresh LineStar"}
+        </Button>
+        {lsMessage && (
+          <p className={`text-xs ${lsMessage.ok ? "text-green-600" : "text-red-500"}`}>
+            {lsMessage.text}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
