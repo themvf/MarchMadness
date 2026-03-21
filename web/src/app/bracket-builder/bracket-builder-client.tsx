@@ -67,6 +67,7 @@ function MatchupSlot({
   prob,
   modelProb,
   championTeamIds,
+  isLocked,
   onPick,
   onDetail,
 }: {
@@ -77,10 +78,12 @@ function MatchupSlot({
   prob: number | null;
   modelProb: number | null;
   championTeamIds: Set<number>;
+  isLocked?: boolean;
   onPick: (slotId: string, teamId: number) => void;
   onDetail: (slotId: string) => void;
 }) {
   const bothPresent = !!teamA && !!teamB;
+  const canInteract = bothPresent && !isLocked;
   const displayProb = modelProb ?? prob;
 
   return (
@@ -90,7 +93,7 @@ function MatchupSlot({
         team={teamA}
         isWinner={winnerId === teamA?.teamId}
         isLoser={winnerId != null && winnerId !== teamA?.teamId}
-        canPick={bothPresent}
+        canPick={canInteract}
         isChampionContender={teamA ? championTeamIds.has(teamA.teamId) : false}
         onClick={() => teamA && onPick(slotDef.id, teamA.teamId)}
       />
@@ -127,7 +130,7 @@ function MatchupSlot({
         team={teamB}
         isWinner={winnerId === teamB?.teamId}
         isLoser={winnerId != null && winnerId !== teamB?.teamId}
-        canPick={bothPresent}
+        canPick={canInteract}
         isChampionContender={teamB ? championTeamIds.has(teamB.teamId) : false}
         onClick={() => teamB && onPick(slotDef.id, teamB.teamId)}
       />
@@ -207,6 +210,7 @@ function RegionBracket({
   picks,
   r64ModelProbs,
   championTeamIds,
+  lockedSlotIds,
   onPick,
   onDetail,
   mirrored,
@@ -217,6 +221,7 @@ function RegionBracket({
   picks: PickState;
   r64ModelProbs: Map<string, number>;
   championTeamIds: Set<number>;
+  lockedSlotIds: Set<string>;
   onPick: (slotId: string, teamId: number) => void;
   onDetail: (slotId: string) => void;
   mirrored?: boolean;
@@ -280,6 +285,7 @@ function RegionBracket({
                     prob={prob}
                     modelProb={modelProb}
                     championTeamIds={championTeamIds}
+                    isLocked={lockedSlotIds.has(def.id)}
                     onPick={onPick}
                     onDetail={onDetail}
                   />
@@ -419,10 +425,33 @@ export default function BracketBuilderClient({
   const [activeRegion, setActiveRegion] = useState<string>("all");
   const [loaded, setLoaded] = useState(false);
 
-  // Load picks from localStorage on mount
+  // Derive locked picks from DB results (slots with a confirmed winner)
+  const lockedSlotIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const mu of matchups) {
+      if (mu.winnerId != null && mu.region) {
+        s.add(`${mu.round}-${mu.region}-${mu.matchupSlot}`);
+      }
+    }
+    return s;
+  }, [matchups]);
+
+  const lockedPicks = useMemo(() => {
+    const lp: PickState = {};
+    for (const mu of matchups) {
+      if (mu.winnerId != null && mu.region) {
+        lp[`${mu.round}-${mu.region}-${mu.matchupSlot}`] = mu.winnerId;
+      }
+    }
+    return lp;
+  }, [matchups]);
+
+  // Load picks from localStorage on mount, locked results always win
   useEffect(() => {
-    setPicks(loadPicks());
+    const stored = loadPicks();
+    setPicks({ ...stored, ...lockedPicks });
     setLoaded(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Save picks on change
@@ -565,15 +594,17 @@ export default function BracketBuilderClient({
   // Pick handler with cascading clear
   const handlePick = useCallback(
     (slotId: string, teamId: number) => {
+      if (lockedSlotIds.has(slotId)) return;
+
       setPicks((prev) => {
         // If clicking the same team that's already picked, unpick
         if (prev[slotId] === teamId) {
           const next = { ...prev };
           delete next[slotId];
-          // Clear all downstream slots
+          // Clear all downstream non-locked slots
           const downstream = getDownstream(slotId, slots);
           for (const dsId of downstream) {
-            delete next[dsId];
+            if (!lockedSlotIds.has(dsId)) delete next[dsId];
           }
           return next;
         }
@@ -587,12 +618,16 @@ export default function BracketBuilderClient({
         // Clear downstream picks of the eliminated team
         if (eliminatedId != null) {
           next = clearDownstreamPicks(slotId, eliminatedId, next, slots);
+          // Re-apply locked picks that may have been cleared
+          for (const [lid, lval] of Object.entries(lockedPicks)) {
+            next[lid] = lval;
+          }
         }
 
         return next;
       });
     },
-    [slots]
+    [slots, lockedSlotIds, lockedPicks]
   );
 
   const handleDetail = useCallback((slotId: string) => {
@@ -604,17 +639,18 @@ export default function BracketBuilderClient({
   }, []);
 
   const handleReset = useCallback(() => {
-    setPicks({});
-  }, []);
+    setPicks({ ...lockedPicks });
+  }, [lockedPicks]);
 
   const handleAutoChalk = useCallback(() => {
-    const newPicks: PickState = {};
+    const newPicks: PickState = { ...lockedPicks };
 
     // Auto-fill: for each slot, pick the team with higher Barthag
     const roundOrder = ["R64", "R32", "S16", "E8", "F4", "NCG"];
     for (const round of roundOrder) {
       for (const [slotId, def] of slots) {
         if (def.round !== round) continue;
+        if (lockedSlotIds.has(slotId)) continue;
 
         const { teamAId, teamBId } = resolveSlotTeams(
           slotId,
@@ -634,7 +670,7 @@ export default function BracketBuilderClient({
     }
 
     setPicks(newPicks);
-  }, [slots, teamMap]);
+  }, [slots, teamMap, lockedPicks, lockedSlotIds]);
 
   const pickCount = countPicks(picks);
 
@@ -754,6 +790,7 @@ export default function BracketBuilderClient({
               picks={picks}
               r64ModelProbs={r64ModelProbs}
               championTeamIds={championTeamIds}
+              lockedSlotIds={lockedSlotIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -776,6 +813,7 @@ export default function BracketBuilderClient({
               picks={picks}
               r64ModelProbs={r64ModelProbs}
               championTeamIds={championTeamIds}
+              lockedSlotIds={lockedSlotIds}
               onPick={handlePick}
               onDetail={handleDetail}
               mirrored
@@ -791,6 +829,7 @@ export default function BracketBuilderClient({
               picks={picks}
               r64ModelProbs={r64ModelProbs}
               championTeamIds={championTeamIds}
+              lockedSlotIds={lockedSlotIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -804,6 +843,7 @@ export default function BracketBuilderClient({
               picks={picks}
               r64ModelProbs={r64ModelProbs}
               championTeamIds={championTeamIds}
+              lockedSlotIds={lockedSlotIds}
               onPick={handlePick}
               onDetail={handleDetail}
               mirrored
@@ -824,6 +864,7 @@ export default function BracketBuilderClient({
               picks={picks}
               r64ModelProbs={r64ModelProbs}
               championTeamIds={championTeamIds}
+              lockedSlotIds={lockedSlotIds}
               onPick={handlePick}
               onDetail={handleDetail}
             />
@@ -845,6 +886,7 @@ export default function BracketBuilderClient({
             picks={picks}
             r64ModelProbs={r64ModelProbs}
             championTeamIds={championTeamIds}
+            lockedSlotIds={lockedSlotIds}
             onPick={handlePick}
             onDetail={handleDetail}
           />
