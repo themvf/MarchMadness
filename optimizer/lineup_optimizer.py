@@ -154,6 +154,8 @@ def solve_one(
     max_exposure: int,
     exposure_count: dict[int, int],
     previous: list[set[int]],
+    max_filler_per_team: int = 3,
+    forced: set[int] | None = None,
 ) -> Lineup | None:
     """Solve one lineup via PuLP binary ILP."""
 
@@ -224,6 +226,28 @@ def solve_one(
                 f"bringback_{t}",
             )
 
+    # Max players per team (prevents one non-stack team from filling all filler slots).
+    # For the primary-stack team: allowed up to ROSTER_SIZE when z[t]=1, else capped.
+    # For non-stackable teams: hard cap at max_filler_per_team.
+    for team, tplayers in team_pool.items():
+        if team in stackable:
+            prob += (
+                pulp.lpSum(x[p.id] for p in tplayers)
+                <= max_filler_per_team + (ROSTER_SIZE - max_filler_per_team) * z[team],
+                f"maxteam_{team}",
+            )
+        else:
+            prob += (
+                pulp.lpSum(x[p.id] for p in tplayers) <= max_filler_per_team,
+                f"maxteam_{team}",
+            )
+
+    # Forced inclusions (minimum-exposure guarantee for top-projected players)
+    if forced:
+        for pid in forced:
+            if pid in x:
+                prob += x[pid] == 1, f"forced_{pid}"
+
     # Exposure cap
     for p in pool:
         if exposure_count.get(p.id, 0) >= max_exposure:
@@ -278,6 +302,9 @@ def optimize(
     max_exposure_pct: float = 0.6,
     stack_min_win_prob: float = DEFAULT_STACK_MIN_WIN_PROB,
     stack_max_win_prob: float = DEFAULT_STACK_MAX_WIN_PROB,
+    max_filler_per_team: int = 3,
+    min_exposure_pct: float = 0.10,
+    min_exposure_top_k: int = 5,
 ) -> list[Lineup]:
     eligible = [
         p for p in pool
@@ -315,19 +342,35 @@ def optimize(
 
     print(f"\nGenerating {n} lineups from {len(eligible)} eligible players")
     print(f"  mode={mode}, stack>={min_stack}, bring-back>={bring_back}, "
-          f"max_exp={max_exposure_pct:.0%}")
+          f"max_exp={max_exposure_pct:.0%}, max_filler={max_filler_per_team}, "
+          f"min_exp={min_exposure_pct:.0%}(top{min_exposure_top_k})")
 
     max_exp_count = math.ceil(n * max_exposure_pct)
+    min_exp_count = math.ceil(n * min_exposure_pct) if min_exposure_pct > 0 else 0
+    # Top-K players by our_proj for minimum-exposure guarantee
+    top_k = sorted(eligible, key=lambda p: p.our_proj or 0, reverse=True)[:min_exposure_top_k]
+
     exposure_count: dict[int, int] = {p.id: 0 for p in eligible}
     previous: list[set[int]] = []
     lineups: list[Lineup] = []
 
     t0 = time.time()
     for i in range(n):
+        # Force top-K players that have fallen below minimum exposure
+        forced: set[int] = set()
+        if min_exp_count > 0:
+            lineups_remaining = n - i
+            for p in top_k:
+                needed = min_exp_count - exposure_count.get(p.id, 0)
+                if needed > 0 and needed >= lineups_remaining:
+                    forced.add(p.id)
+
         lineup = solve_one(
             eligible, mode, min_stack, bring_back,
             stack_min_win_prob, stack_max_win_prob,
             max_exp_count, exposure_count, previous,
+            max_filler_per_team=max_filler_per_team,
+            forced=forced or None,
         )
         if lineup is None:
             print(f"  Stopped at lineup {i+1}: no more feasible lineups")
@@ -462,6 +505,9 @@ def run(
     slate_date: str | None = None,
     strategy: str | None = None,
     save: bool = False,
+    max_filler_per_team: int = 3,
+    min_exposure_pct: float = 0.10,
+    min_exposure_top_k: int = 5,
 ) -> None:
     config = load_config()
     db = DatabaseManager(config.database_url)
@@ -518,6 +564,7 @@ def run(
     lineups = optimize(
         pool, n, mode, min_stack, bring_back, max_exposure,
         stack_min_win_prob, stack_max_win_prob,
+        max_filler_per_team, min_exposure_pct, min_exposure_top_k,
     )
     if not lineups:
         print("No lineups generated.")
@@ -565,10 +612,17 @@ if __name__ == "__main__":
                         help="Label for this run in dk_lineups (e.g. 'basic', 'stacked')")
     parser.add_argument("--save", action="store_true",
                         help="Save lineups to dk_lineups table for post-slate comparison")
+    parser.add_argument("--max-filler-per-team", type=int, default=3,
+                        help="Max players from any non-stack team (default 3)")
+    parser.add_argument("--min-exposure", type=float, default=0.10,
+                        help="Min exposure for top-K projected players (default 0.10 = 10%%)")
+    parser.add_argument("--min-exposure-top-k", type=int, default=5,
+                        help="Apply min-exposure guarantee to top K players by projection (default 5)")
     args = parser.parse_args()
     run(
         args.entries, args.out, args.n, args.mode, args.stack,
         args.bring_back, args.exposure,
         args.stack_min_prob, args.stack_max_prob,
         args.slate_date, args.strategy, args.save,
+        args.max_filler_per_team, args.min_exposure, args.min_exposure_top_k,
     )
