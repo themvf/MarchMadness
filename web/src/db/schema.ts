@@ -323,6 +323,7 @@ export const dkPlayers = pgTable(
     ourProj: doublePrecision("our_proj"),
     ourLeverage: doublePrecision("our_leverage"),
     actualFpts: doublePrecision("actual_fpts"),
+    actualOwnPct: doublePrecision("actual_own_pct"),
   },
   (t) => [unique("dk_players_slate_player_key").on(t.slateId, t.dkPlayerId)]
 );

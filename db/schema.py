@@ -285,6 +285,7 @@ TABLES = [
         our_proj REAL,
         our_leverage REAL,
         actual_fpts REAL,
+        actual_own_pct REAL,
         UNIQUE(slate_id, dk_player_id)
     )
     """,
@@ -313,6 +314,7 @@ TABLES = [
 # Safe to re-run — Postgres ignores duplicates.
 MIGRATIONS = [
     "ALTER TABLE dk_players ADD COLUMN IF NOT EXISTS actual_fpts REAL",
+    "ALTER TABLE dk_players ADD COLUMN IF NOT EXISTS actual_own_pct REAL",
 ]
 
 INDEXES = [

@@ -1,16 +1,19 @@
-"""Ingest DraftKings results CSV → actual_fpts in dk_players.
+"""Ingest DraftKings results → actual_fpts + actual_own_pct in dk_players.
 
-DK posts a results CSV after each slate completes. It has the same format
-as the salary CSV plus an FPTS column (sometimes called "Total Points").
+Supports two file formats:
 
-Usage:
-    python -m ingest.dk_results --results DKResults_3_21_2026.csv
-    python -m ingest.dk_results --results DKResults_3_21_2026.csv --slate-date 2026-03-21
+1. DK Salary-style results CSV (simple):
+   Columns: Position, Name+ID, Name, ID, ..., Salary, ..., FPTS
+   Usage: python -m ingest.dk_results --results DKResults_3_21_2026.csv
 
-Matches players by name (fuzzy) + salary against the most recent slate
-(or the slate matching --slate-date). Updates actual_fpts in dk_players.
+2. DK Contest Standings CSV (richer — includes actual ownership):
+   Columns: Rank, EntryId, ..., Lineup, , Player, Roster Position, %Drafted, FPTS
+   Usage: python -m ingest.dk_results --results contest-standings-189023744.csv
 
-Expected update rate: ~95%+ (DK name variants are consistent within a slate).
+The standings format is preferred when available — it includes actual %Drafted
+which is required for ownership model training.
+
+Expected match rate: ~95%+ (DK name variants are consistent within a slate).
 """
 
 from __future__ import annotations
@@ -26,6 +29,48 @@ from config import load_config
 from db.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+def detect_format(content: str) -> str:
+    """Return 'standings' or 'results' based on CSV header."""
+    first_line = content.split("\n")[0]
+    if "EntryId" in first_line or "%Drafted" in first_line:
+        return "standings"
+    return "results"
+
+
+def parse_contest_standings_csv(content: str) -> list[dict]:
+    """Parse DK post-contest standings CSV.
+
+    The right-side columns (8-10) contain per-player data sorted by ownership:
+      Player | Roster Position | %Drafted | FPTS
+
+    Each player appears exactly once. Returns list of
+    {name, actual_fpts, actual_own_pct}.
+    """
+    reader = csv.reader(io.StringIO(content))
+    next(reader)  # skip header
+    players: dict[str, dict] = {}
+    for row in reader:
+        if len(row) < 11:
+            continue
+        name = row[7].strip()
+        if not name:
+            continue
+        own_str = row[9].strip().replace("%", "")
+        fpts_str = row[10].strip()
+        try:
+            actual_fpts = float(fpts_str)
+            actual_own_pct = float(own_str)
+            if name not in players:  # first occurrence wins (they repeat)
+                players[name] = {
+                    "name": name,
+                    "actual_fpts": actual_fpts,
+                    "actual_own_pct": actual_own_pct,
+                }
+        except ValueError:
+            pass
+    return list(players.values())
 
 
 def parse_dk_results_csv(content: str) -> list[dict]:
@@ -69,7 +114,14 @@ def run(results_path: str, slate_date: str | None = None) -> None:
     with open(results_path, encoding="utf-8-sig") as f:
         content = f.read()
 
-    result_players = parse_dk_results_csv(content)
+    fmt = detect_format(content)
+    if fmt == "standings":
+        result_players = parse_contest_standings_csv(content)
+        print(f"Detected format: contest standings (includes actual ownership)")
+    else:
+        result_players = parse_dk_results_csv(content)
+        print(f"Detected format: results CSV")
+
     if not result_players:
         print("ERROR: No players with FPTS found. Check column names in results CSV.")
         return
@@ -101,21 +153,30 @@ def run(results_path: str, slate_date: str | None = None) -> None:
     unmatched = []
 
     for result_p in result_players:
-        # Exact match first (name + salary)
+        own_pct = result_p.get("actual_own_pct")
+        r_salary = result_p.get("salary")
+
+        # Exact match: name + salary (salary only available in results format)
         exact = next(
-            (p for p in pool if p["name"] == result_p["name"] and p["salary"] == result_p["salary"]),
+            (
+                p for p in pool
+                if p["name"] == result_p["name"]
+                and (r_salary is None or p["salary"] == r_salary)
+            ),
             None,
         )
+
         if exact:
             db.execute(
-                "UPDATE dk_players SET actual_fpts = %s WHERE id = %s",
-                (result_p["actual_fpts"], exact["id"]),
+                "UPDATE dk_players SET actual_fpts = %s, actual_own_pct = %s WHERE id = %s",
+                (result_p["actual_fpts"], own_pct, exact["id"]),
             )
             updated += 1
             continue
 
-        # Fuzzy name match (same salary preferred, but not required)
-        same_salary = [p for p in pool if p["salary"] == result_p["salary"]]
+        # Fuzzy name match — standings format has no salary, so match by name only
+        has_salary = result_p.get("salary") is not None
+        same_salary = [p for p in pool if p["salary"] == result_p.get("salary")] if has_salary else []
         candidates = same_salary if same_salary else pool
         candidate_names = [p["name"] for p in candidates]
 
@@ -128,8 +189,8 @@ def run(results_path: str, slate_date: str | None = None) -> None:
         if match:
             player = candidates[candidate_names.index(match[0])]
             db.execute(
-                "UPDATE dk_players SET actual_fpts = %s WHERE id = %s",
-                (result_p["actual_fpts"], player["id"]),
+                "UPDATE dk_players SET actual_fpts = %s, actual_own_pct = %s WHERE id = %s",
+                (result_p["actual_fpts"], own_pct, player["id"]),
             )
             updated += 1
         else:
@@ -158,13 +219,33 @@ def run(results_path: str, slate_date: str | None = None) -> None:
         (slate_id,),
     )
     if stats and stats["n_our"]:
-        print(f"\n── Accuracy (n={stats['n_our']}) ─────────────")
-        print(f"  Our model  — MAE: {stats['our_mae']:.2f}  Bias: {stats['our_bias']:+.2f}")
+        print(f"\n-- FPTS Accuracy (n={stats['n_our']}) --------")
+        print(f"  Our model  -- MAE: {stats['our_mae']:.2f}  Bias: {stats['our_bias']:+.2f}")
         if stats["n_ls"]:
-            print(f"  LineStar   — MAE: {stats['ls_mae']:.2f}  Bias: {stats['ls_bias']:+.2f}")
+            print(f"  LineStar   -- MAE: {stats['ls_mae']:.2f}  Bias: {stats['ls_bias']:+.2f}")
             winner = "Our model" if stats["our_mae"] < stats["ls_mae"] else "LineStar"
             diff = abs(stats["our_mae"] - stats["ls_mae"])
             print(f"  Winner: {winner} by {diff:.2f} pts/player")
+
+    # Ownership accuracy (only populated from standings format)
+    own_stats = db.execute_one(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE actual_own_pct IS NOT NULL AND proj_own_pct IS NOT NULL) AS n,
+            AVG(ABS(proj_own_pct - actual_own_pct))
+                FILTER (WHERE actual_own_pct IS NOT NULL AND proj_own_pct IS NOT NULL) AS mae,
+            AVG(proj_own_pct - actual_own_pct)
+                FILTER (WHERE actual_own_pct IS NOT NULL AND proj_own_pct IS NOT NULL) AS bias,
+            CORR(proj_own_pct, actual_own_pct)
+                FILTER (WHERE actual_own_pct IS NOT NULL AND proj_own_pct IS NOT NULL) AS corr
+        FROM dk_players WHERE slate_id = %s
+        """,
+        (slate_id,),
+    )
+    if own_stats and own_stats["n"]:
+        print(f"\n-- Ownership Accuracy (n={own_stats['n']}) ---")
+        print(f"  MAE:  {own_stats['mae']:.2f}%  Bias: {own_stats['bias']:+.2f}%")
+        print(f"  Corr: {own_stats['corr']:.3f}  (1.0 = perfect rank-order)")
 
     update_lineup_actuals(db, slate_id)
 
