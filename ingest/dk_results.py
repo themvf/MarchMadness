@@ -248,6 +248,87 @@ def run(results_path: str, slate_date: str | None = None) -> None:
         print(f"  Corr: {own_stats['corr']:.3f}  (1.0 = perfect rank-order)")
 
     update_lineup_actuals(db, slate_id)
+    print_value_misses(db, slate_id)
+
+
+def print_value_misses(db, slate_id: int, fpts_threshold: float = 30.0, own_threshold: float = 15.0) -> None:
+    """Report high-scoring low-owned players that we missed entirely.
+
+    Flags players where:
+      - actual_fpts >= fpts_threshold  (boom game)
+      - proj_own_pct < own_threshold   (low projected ownership → should have been leverage)
+      - Not in ANY of our saved dk_lineups for this slate
+
+    This is the core feedback loop for the leverage model: if these players
+    were projectable AND low-owned, our leverage score should have surfaced them.
+    """
+    # Get all player IDs that appear in at least one of our lineups
+    lineup_player_sets = db.execute(
+        "SELECT player_ids FROM dk_lineups WHERE slate_id = %s", (slate_id,)
+    )
+    if not lineup_player_sets:
+        return  # no lineups saved, nothing to compare
+
+    our_player_ids: set[int] = set()
+    for row in lineup_player_sets:
+        for pid_str in (row["player_ids"] or "").split(","):
+            pid_str = pid_str.strip()
+            if pid_str.isdigit():
+                our_player_ids.add(int(pid_str))
+
+    # Query value-miss candidates
+    misses = db.execute(
+        """
+        SELECT
+            name,
+            team_abbrev,
+            salary,
+            our_proj,
+            linestar_proj,
+            proj_own_pct,
+            actual_fpts,
+            actual_own_pct,
+            our_leverage,
+            id
+        FROM dk_players
+        WHERE slate_id = %s
+          AND actual_fpts >= %s
+          AND (proj_own_pct IS NULL OR proj_own_pct < %s)
+          AND actual_fpts IS NOT NULL
+        ORDER BY actual_fpts DESC
+        """,
+        (slate_id, fpts_threshold, own_threshold),
+    )
+
+    if not misses:
+        print(f"\n-- Value Misses: none (no player scored ≥{fpts_threshold} with <{own_threshold}% proj own)")
+        return
+
+    # Split into missed vs captured
+    missed = [p for p in misses if p["id"] not in our_player_ids]
+    captured = [p for p in misses if p["id"] in our_player_ids]
+
+    print(f"\n-- Value Misses (actual ≥{fpts_threshold:.0f} FPTS, proj own <{own_threshold:.0f}%) --")
+    print(f"  {len(captured)} captured in our lineups, {len(missed)} missed entirely\n")
+
+    if missed:
+        print(f"  {'Name':<22} {'Team':>5}  {'Sal':>6}  {'OurProj':>8}  {'LSProj':>8}  {'ProjOwn':>8}  {'ActOwn':>7}  {'ActFPTS':>8}  {'Leverage':>9}")
+        print("  " + "-" * 95)
+        for p in missed:
+            our_proj_s = f"{p['our_proj']:.1f}" if p["our_proj"] is not None else "  N/A"
+            ls_proj_s  = f"{p['linestar_proj']:.1f}" if p["linestar_proj"] is not None else "  N/A"
+            proj_own_s = f"{p['proj_own_pct']:.1f}%" if p["proj_own_pct"] is not None else "  N/A"
+            act_own_s  = f"{p['actual_own_pct']:.1f}%" if p["actual_own_pct"] is not None else "  N/A"
+            lev_s      = f"{p['our_leverage']:.2f}" if p["our_leverage"] is not None else "  N/A"
+            print(
+                f"  {p['name']:<22} {p['team_abbrev']:>5}  ${p['salary']:>5}  "
+                f"{our_proj_s:>8}  {ls_proj_s:>8}  {proj_own_s:>8}  {act_own_s:>7}  "
+                f"{p['actual_fpts']:>8.1f}  {lev_s:>9}"
+            )
+
+    if captured:
+        names = ", ".join(p["name"] for p in captured)
+        print(f"\n  Captured (appeared in ≥1 lineup): {names}")
 
 
 def update_lineup_actuals(db, slate_id: int) -> None:

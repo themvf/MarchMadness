@@ -71,10 +71,12 @@ function parseDkCsv(content: string): Array<{
   return players;
 }
 
-function parseLinestarCsv(content: string): Map<string, { linestarProj: number; projOwnPct: number }> {
+type LinestarEntry = { linestarProj: number; projOwnPct: number; isOut: boolean };
+
+function parseLinestarCsv(content: string): Map<string, LinestarEntry> {
   const lines = content.split(/\r?\n/).filter(Boolean);
   // Skip header row; columns: Pos, Team, Player, Salary, projOwn%, actualOwn%, Diff, Proj
-  const map = new Map<string, { linestarProj: number; projOwnPct: number }>();
+  const map = new Map<string, LinestarEntry>();
   for (let i = 1; i < lines.length; i++) {
     const cells = lines[i].split(",").map((c) => c.trim());
     if (cells.length < 8) continue;
@@ -87,8 +89,10 @@ function parseLinestarCsv(content: string): Map<string, { linestarProj: number; 
     const projOwn = parseFloat(projOwnStr) || 0;
     if (proj === 0 && projOwn === 0) continue; // true DNP
     const salary = parseInt(salaryStr, 10) || 0;
+    // isOut: proj=0 with some ownership means LineStar listed but gave 0 projection (injury/GTD)
+    const isOut = proj === 0;
     // Key: "name_lower|salary" — allows salary-confirmed fuzzy match
-    map.set(`${playerName.toLowerCase()}|${salary}`, { linestarProj: proj, projOwnPct: projOwn });
+    map.set(`${playerName.toLowerCase()}|${salary}`, { linestarProj: proj, projOwnPct: projOwn, isOut });
   }
   return map;
 }
@@ -112,13 +116,13 @@ function levenshtein(a: string, b: string): number {
 function findLinestarMatch(
   name: string,
   salary: number,
-  map: Map<string, { linestarProj: number; projOwnPct: number }>
+  map: Map<string, LinestarEntry>
 ) {
   // Exact match first
   const exact = map.get(`${name.toLowerCase()}|${salary}`);
   if (exact) return exact;
   // Fuzzy: find best name match with same salary
-  let best: { linestarProj: number; projOwnPct: number } | null = null;
+  let best: LinestarEntry | null = null;
   let bestDist = 4; // max edit distance threshold
   for (const [key, val] of map.entries()) {
     const [lsName, lsSalStr] = key.split("|");
@@ -173,12 +177,15 @@ function matchTeamId(abbrev: string, teamCache: Map<string, number>): number | n
 
 // ── Projection helpers ───────────────────────────────────────
 
+const LEAGUE_AVG_TOTAL = 145.0; // approximate NCAA tournament game total
+
 function computeOurProjection(
   player: { minPct: number | null; usageRate: number | null; ppg: number | null; rpg: number | null; apg: number | null; stlPct: number | null; blkPct: number | null; tovPct: number | null },
   teamTempo: number,
   oppTempo: number,
   oppDe: number,
-  winProb: number
+  winProb: number,
+  vegasTotal: number | null = null,
 ): number | null {
   const minPct = player.minPct ?? 0;
   if (minPct < 5) return null;
@@ -188,7 +195,15 @@ function computeOurProjection(
   const gameTempo = (teamTempo + oppTempo) / 2;
   const paceFactor = gameTempo / LEAGUE_AVG_TEMPO;
   const defFactor = LEAGUE_AVG_ADJE / (oppDe || LEAGUE_AVG_ADJE);
-  const blowoutFactor = 1.0 - Math.max(0, (winProb - 0.75) * 0.5);
+
+  // Vegas total is a direct measure of expected scoring environment.
+  // Blend 40% pace-derived / 60% Vegas-derived for rebounds and possession stats.
+  const totalFactor = vegasTotal ? vegasTotal / LEAGUE_AVG_TOTAL : 1.0;
+  const combinedPace = paceFactor * 0.4 + totalFactor * 0.6;
+
+  // Steeper blowout curve: activates at 70% (not 75%), floored at 0.65.
+  // 70% → 0% reduction; 85% → ~13%; 95% → ~25%; 100% → floored at 65%.
+  const blowoutFactor = Math.max(0.65, 1.0 - Math.pow(Math.max(0, winProb - 0.70), 1.5));
   const projMinutes = avgMinutes * blowoutFactor;
 
   const ppg = player.ppg ?? 0;
@@ -200,7 +215,7 @@ function computeOurProjection(
   const usage = player.usageRate ?? 20;
 
   const projPts = (ppg / avgMinutes) * projMinutes * defFactor;
-  const projReb = (rpg / avgMinutes) * projMinutes * paceFactor;
+  const projReb = (rpg / avgMinutes) * projMinutes * combinedPace;
   const projAst = (apg / avgMinutes) * projMinutes * defFactor;
   const teamPoss = gameTempo * 2;
   const projStl = (stlPct / 100) * teamPoss * (projMinutes / 40);
@@ -216,14 +231,24 @@ function computeLeverage(
   projOwnPct: number,
   ourWinProb: number | null,
   vegasWinProb: number | null,
-  contrarianFactor = 0.7
+  contrarianFactor = 0.7,
+  stlPct = 0,   // steal % — proxy for boom potential via turnovers forced
+  blkPct = 0,   // block % — proxy for boom potential via shot blocking
 ): number {
   const ownFraction = Math.max(0, Math.min(1, projOwnPct / 100));
   let base = ourProj * Math.pow(1 - ownFraction, contrarianFactor);
+
   if (ourWinProb != null && vegasWinProb != null && vegasWinProb > 0) {
     const edge = Math.max(0, ourWinProb - vegasWinProb);
     base *= 1 + edge * 2;
   }
+
+  // Ceiling bonus: reward players who can boom via high-variance stat categories.
+  // stlPct and blkPct are team-possession-rate stats (typically 1–8%).
+  // A player at stlPct=4, blkPct=5 gets ~1.09× multiplier vs baseline player.
+  const ceilingBonus = 1.0 + stlPct * 0.02 + blkPct * 0.015;
+  base *= ceilingBonus;
+
   return Math.round(base * 1000) / 1000;
 }
 
@@ -294,6 +319,7 @@ export async function processDkSlate(formData: FormData): Promise<{ success: boo
         teamBId: bracketMatchups.teamBId,
         modelProbA: bracketMatchups.modelProbA,
         vegasProbA: bracketMatchups.vegasProbA,
+        vegasTotal: bracketMatchups.vegasTotal,
       })
       .from(bracketMatchups)
       .where(and(eq(bracketMatchups.season, CURRENT_SEASON), isNull(bracketMatchups.winnerId)));
@@ -364,12 +390,15 @@ export async function processDkSlate(formData: FormData): Promise<{ success: boo
           teamR?.adjTempo ?? LEAGUE_AVG_TEMPO,
           oppR?.adjTempo ?? LEAGUE_AVG_TEMPO,
           oppR?.adjDe ?? LEAGUE_AVG_ADJE,
-          winProb
+          winProb,
+          matchup.vegasTotal ?? null,
         );
       }
 
+      const isOut = ls?.isOut ?? false;
       const ourLeverage = (ourProj != null && ls?.projOwnPct != null)
-        ? computeLeverage(ourProj, ls.projOwnPct, winProb, vegasWinProb)
+        ? computeLeverage(ourProj, ls.projOwnPct, winProb, vegasWinProb, 0.7,
+            matchedStats?.stlPct ?? 0, matchedStats?.blkPct ?? 0)
         : null;
 
       await db
@@ -387,6 +416,7 @@ export async function processDkSlate(formData: FormData): Promise<{ success: boo
           avgFptsDk: p.avgFptsDk,
           linestarProj: ls?.linestarProj ?? null,
           projOwnPct: ls?.projOwnPct ?? null,
+          isOut,
           ourProj,
           ourLeverage,
         })
@@ -395,6 +425,7 @@ export async function processDkSlate(formData: FormData): Promise<{ success: boo
           set: {
             linestarProj: ls?.linestarProj ?? undefined,
             projOwnPct: ls?.projOwnPct ?? undefined,
+            isOut,
             ourProj: ourProj ?? undefined,
             ourLeverage: ourLeverage ?? undefined,
             teamId: teamId ?? undefined,
@@ -481,7 +512,7 @@ export async function refreshLinestarProjs(
           : null;
       await db
         .update(dkPlayers)
-        .set({ linestarProj: ls.linestarProj, projOwnPct: ls.projOwnPct, ourLeverage })
+        .set({ linestarProj: ls.linestarProj, projOwnPct: ls.projOwnPct, isOut: ls.isOut ?? false, ourLeverage })
         .where(eq(dkPlayers.id, row.id));
       updated++;
     }
@@ -591,6 +622,7 @@ export async function refreshLinestarApi(
         .set({
           linestarProj: lsData.linestarProj,
           projOwnPct: lsData.projOwnPct,
+          isOut: lsData.isOut,
           ourLeverage,
         })
         .where(eq(dkPlayers.id, row.id));
@@ -762,7 +794,7 @@ export async function loadSlateFromApi(
     const ratingsMap = new Map(allRatings.map((r) => [r.teamId, r]));
 
     const activeMatchups = await db
-      .select({ id: bracketMatchups.id, teamAId: bracketMatchups.teamAId, teamBId: bracketMatchups.teamBId, modelProbA: bracketMatchups.modelProbA, vegasProbA: bracketMatchups.vegasProbA })
+      .select({ id: bracketMatchups.id, teamAId: bracketMatchups.teamAId, teamBId: bracketMatchups.teamBId, modelProbA: bracketMatchups.modelProbA, vegasProbA: bracketMatchups.vegasProbA, vegasTotal: bracketMatchups.vegasTotal })
       .from(bracketMatchups)
       .where(and(eq(bracketMatchups.season, CURRENT_SEASON), isNull(bracketMatchups.winnerId)));
 
@@ -845,7 +877,8 @@ export async function loadSlateFromApi(
           ratingsMap.get(teamId)?.adjTempo ?? LEAGUE_AVG_TEMPO,
           ratingsMap.get(oppId)?.adjTempo ?? LEAGUE_AVG_TEMPO,
           ratingsMap.get(oppId)?.adjDe ?? LEAGUE_AVG_ADJE,
-          winProb
+          winProb,
+          matchup.vegasTotal ?? null,
         );
       }
 
@@ -856,7 +889,8 @@ export async function loadSlateFromApi(
       // optimizer excludes them even if our model has a non-zero ourProj.
       const projForLeverage = isOut ? 0 : (ourProj ?? linestarProj);
       const ourLeverage = (projForLeverage != null && projForLeverage > 0 && projOwnPct != null)
-        ? computeLeverage(projForLeverage, projOwnPct, winProb, vegasWinProb)
+        ? computeLeverage(projForLeverage, projOwnPct, winProb, vegasWinProb, 0.7,
+            matchedStats?.stlPct ?? 0, matchedStats?.blkPct ?? 0)
         : null;
 
       await db
@@ -874,6 +908,7 @@ export async function loadSlateFromApi(
           avgFptsDk: p.avgFptsDk,
           linestarProj,
           projOwnPct,
+          isOut,
           ourProj,
           ourLeverage,
         })
@@ -886,6 +921,7 @@ export async function loadSlateFromApi(
             matchupId: matchup?.id ?? undefined,
             linestarProj: linestarProj ?? undefined,
             projOwnPct: projOwnPct ?? undefined,
+            isOut,
             ourProj: ourProj ?? undefined,
             ourLeverage: ourLeverage ?? undefined,
           },

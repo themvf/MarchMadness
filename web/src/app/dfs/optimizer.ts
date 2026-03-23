@@ -43,6 +43,7 @@ export type OptimizerPlayer = Pick<
   | "ourLeverage"
   | "linestarProj"
   | "projOwnPct"
+  | "isOut"
   | "gameInfo"
   | "teamLogo"
   | "teamName"
@@ -83,8 +84,10 @@ export function optimizeLineups(
 ): GeneratedLineup[] {
   const { mode, nLineups, minStack, maxExposure } = settings;
 
-  // Only include players with a usable projection
+  // Only include players with a usable projection and confirmed active status.
+  // isOut=true means LineStar marked them injured/OUT — hard exclude regardless of ourProj.
   const eligible = pool.filter((p) => {
+    if (p.isOut) return false;
     const score = mode === "gpp" ? p.ourLeverage : p.ourProj;
     return score != null && score > 0 && p.salary > 0;
   });
@@ -129,23 +132,29 @@ function solveOneLineup(
   exposureCount: Map<number, number>,
   previousLineupSets: Set<number>[]
 ): GeneratedLineup | null {
-  // Get unique teams with enough players for a stack
-  const teamPlayers = new Map<string, OptimizerPlayer[]>();
+  // Game stacking: group players by matchupId (players from BOTH teams in a game).
+  // This captures correlated upside — Lipsey + Momcilovic from the same high-total
+  // game — which team stacks miss entirely.
+  const gamePlayers = new Map<number, OptimizerPlayer[]>();
   for (const p of pool) {
-    const team = p.teamAbbrev;
-    if (!teamPlayers.has(team)) teamPlayers.set(team, []);
-    teamPlayers.get(team)!.push(p);
+    if (p.matchupId == null) continue;
+    if (!gamePlayers.has(p.matchupId)) gamePlayers.set(p.matchupId, []);
+    gamePlayers.get(p.matchupId)!.push(p);
   }
-  const stackableTeams = Array.from(teamPlayers.entries())
+  const stackableGames = Array.from(gamePlayers.entries())
     .filter(([, players]) => players.length >= minStack)
-    .map(([team]) => team);
+    .map(([mid]) => mid);
+
+  // GPP: enforce min 3 player changes per lineup for genuine diversity.
+  // Cash: 2 changes is fine (less variance needed).
+  const minChanges = mode === "gpp" ? 3 : 2;
 
   const constraints: SolverModel["constraints"] = {
     salary: { max: SALARY_CAP },
     total: { equal: ROSTER_SIZE },
     g_count: { min: MIN_G },
     f_count: { min: MIN_F },
-    stack_count: { min: 1 }, // at least one z_T = 1
+    stack_count: { min: 1 }, // at least one z_M = 1 (one game is stacked)
   };
 
   // Exposure cap: player cannot appear in more than maxExposureCount lineups
@@ -156,14 +165,14 @@ function solveOneLineup(
     }
   }
 
-  // Diversity: enforce at least 2 different players vs each previous lineup
+  // Diversity: enforce minChanges different players vs each previous lineup
   for (let i = 0; i < previousLineupSets.length; i++) {
-    constraints[`div_${i}`] = { max: ROSTER_SIZE - 2 }; // at most 6 overlap
+    constraints[`div_${i}`] = { max: ROSTER_SIZE - minChanges };
   }
 
-  // Per-team stack constraints: sum(players from T) - minStack * z_T >= 0
-  for (const team of stackableTeams) {
-    constraints[`team_${team}`] = { min: 0 };
+  // Per-game stack constraints: sum(players from matchup M) - minStack * z_M >= 0
+  for (const mid of stackableGames) {
+    constraints[`game_${mid}`] = { min: 0 };
   }
 
   const variables: SolverModel["variables"] = {};
@@ -183,9 +192,9 @@ function solveOneLineup(
     if (pos.includes("G")) entry.g_count = 1;
     if (pos.includes("F")) entry.f_count = 1;
 
-    // Team stack coefficient
-    if (stackableTeams.includes(p.teamAbbrev)) {
-      entry[`team_${p.teamAbbrev}`] = 1;
+    // Game stack coefficient (player contributes to their matchup's stack count)
+    if (p.matchupId != null && stackableGames.includes(p.matchupId)) {
+      entry[`game_${p.matchupId}`] = 1;
     }
 
     // Diversity coefficients
@@ -204,12 +213,12 @@ function solveOneLineup(
     binaries[key] = 1;
   }
 
-  // Stack helper variables z_T (binary: 1 = this team is the stacked team)
-  for (const team of stackableTeams) {
-    const key = `z_${team}`;
+  // Stack helper variables z_M (binary: 1 = this game is the stacked game)
+  for (const mid of stackableGames) {
+    const key = `z_game_${mid}`;
     variables[key] = {
       stack_count: 1,
-      [`team_${team}`]: -minStack, // sum(team players) - minStack * z_T >= 0
+      [`game_${mid}`]: -minStack, // sum(game players) - minStack * z_M >= 0
     };
     binaries[key] = 1;
   }

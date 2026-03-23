@@ -18,6 +18,7 @@ from __future__ import annotations
 
 LEAGUE_AVG_TEMPO = 68.5
 LEAGUE_AVG_ADJE = 100.0
+LEAGUE_AVG_TOTAL = 145.0  # approximate NCAA tournament game total
 
 
 def compute_our_projection(
@@ -25,6 +26,7 @@ def compute_our_projection(
     team: dict,
     opponent: dict,
     win_prob: float,
+    vegas_total: float | None = None,
 ) -> float | None:
     """Compute our DFS projection for a player.
 
@@ -34,6 +36,8 @@ def compute_our_projection(
         team:   torvik_ratings row for player's team — adj_tempo, adj_de.
         opponent: torvik_ratings row for opponent — adj_tempo, adj_de.
         win_prob: model win probability for player's team (0-1).
+        vegas_total: Vegas over/under for the game (optional). When provided,
+                     blended with pace for a more accurate environment signal.
 
     Returns:
         Projected DK fantasy points, or None if insufficient data.
@@ -62,17 +66,22 @@ def compute_our_projection(
     game_tempo = (team_tempo + opp_tempo) / 2
     pace_factor = game_tempo / LEAGUE_AVG_TEMPO
 
+    # Vegas total is a direct measure of expected scoring environment (pace + efficiency).
+    # Blend 40% pace-derived / 60% Vegas-derived for rebound + possession stats.
+    total_factor = (vegas_total / LEAGUE_AVG_TOTAL) if vegas_total else 1.0
+    combined_pace = pace_factor * 0.4 + total_factor * 0.6
+
     # Defensive adjustment: lower opponent AdjDE = weaker defense = easier to score
     def_factor = LEAGUE_AVG_ADJE / opp_de
 
-    # Blowout risk: winning big → starters pulled early
-    # Scales from 0% reduction at 75% win prob to 12.5% reduction at 100% win prob
-    blowout_factor = 1.0 - max(0.0, (win_prob - 0.75) * 0.5)
+    # Steeper blowout curve: activates at 70% win prob (not 75%), floored at 0.65.
+    # 70% win prob → no reduction; 85% → ~13%; 95% → ~25%; 100% → floor at 65%.
+    blowout_factor = max(0.65, 1.0 - max(0.0, (win_prob - 0.70) ** 1.5))
     proj_minutes = avg_minutes * blowout_factor
 
     # Per-minute rates × projected minutes (with pace/defense adjustments)
     proj_pts = (ppg / avg_minutes) * proj_minutes * def_factor
-    proj_reb = (rpg / avg_minutes) * proj_minutes * pace_factor
+    proj_reb = (rpg / avg_minutes) * proj_minutes * combined_pace
     proj_ast = (apg / avg_minutes) * proj_minutes * def_factor
 
     # Rate-based steals and blocks (fraction of team possessions)
@@ -101,20 +110,22 @@ def compute_leverage(
     our_win_prob: float | None = None,
     vegas_win_prob: float | None = None,
     contrarian_factor: float = 0.7,
+    stl_pct: float = 0.0,
+    blk_pct: float = 0.0,
 ) -> float:
     """Compute GPP leverage score for a player.
 
     Combines projected FPTS, projected ownership (lower = more leverage),
-    and our model's edge over Vegas (mispriced upside). Players on teams
-    where our model sees more value than Vegas calibrated for will be
-    systematically underowned relative to their true expected production.
+    our model's edge over Vegas, and a ceiling bonus for high-variance players.
 
     Args:
-        our_proj:        Our projected DK FPTS.
-        proj_own_pct:    Projected ownership % (0–100).
-        our_win_prob:    Our model's win probability for player's team (0–1).
-        vegas_win_prob:  Vegas implied win probability (0–1).
+        our_proj:          Our projected DK FPTS.
+        proj_own_pct:      Projected ownership % (0–100).
+        our_win_prob:      Our model's win probability for player's team (0–1).
+        vegas_win_prob:    Vegas implied win probability (0–1).
         contrarian_factor: Ownership discount exponent (0.7 = moderate contrarian).
+        stl_pct:           Steal % (team-possession rate) — boom-game proxy.
+        blk_pct:           Block % (team-possession rate) — boom-game proxy.
 
     Returns:
         Leverage score (higher = better GPP play).
@@ -125,5 +136,10 @@ def compute_leverage(
     if our_win_prob is not None and vegas_win_prob is not None and vegas_win_prob > 0:
         edge = max(0.0, our_win_prob - vegas_win_prob)
         base *= 1 + edge * 2
+
+    # Ceiling bonus: players who can boom via high-variance categories (steals/blocks)
+    # get a multiplier. stl_pct=4, blk_pct=5 → ~1.09× vs baseline.
+    ceiling_bonus = 1.0 + stl_pct * 0.02 + blk_pct * 0.015
+    base *= ceiling_bonus
 
     return round(base, 3)

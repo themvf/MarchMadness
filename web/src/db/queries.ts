@@ -864,6 +864,7 @@ export type DkPlayerRow = {
   projOwnPct: number | null;
   ourProj: number | null;
   ourLeverage: number | null;
+  isOut: boolean | null;
   actualFpts: number | null;
   actualOwnPct: number | null;
   // Joined fields
@@ -895,6 +896,7 @@ export async function getDkPlayers(
       dp.proj_own_pct as "projOwnPct",
       dp.our_proj as "ourProj",
       dp.our_leverage as "ourLeverage",
+      dp.is_out as "isOut",
       dp.actual_fpts as "actualFpts",
       dp.actual_own_pct as "actualOwnPct",
       t.name as "teamName",
