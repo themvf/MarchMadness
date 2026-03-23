@@ -135,7 +135,7 @@ function findLinestarMatch(
 // Match DK team abbreviation to team_id
 const DK_OVERRIDES: Record<string, string> = {
   DUKE: "Duke", TCU: "TCU", KU: "Kansas", KSAS: "Kansas",
-  STJ: "St. John's (NY)", STJN: "St. John's (NY)", STJS: "St. John's (NY)",
+  STJ: "St. John's", STJN: "St. John's", STJS: "St. John's",
   CONN: "Connecticut", CCONN: "Connecticut", UCONN: "Connecticut",
   "MICH ST": "Michigan State", MSU: "Michigan State",
   LOU: "Louisville", UCLA: "UCLA", TTU: "Texas Tech",
@@ -500,4 +500,262 @@ export async function exportLineups(
 ): Promise<string> {
   const lines = entryTemplateCsv.split(/\r?\n/).filter(Boolean);
   return buildMultiEntryCSV(lineups, lines);
+}
+
+// ── DK API helpers ───────────────────────────────────────────
+
+const DK_PROJ_STAT_ID = 279;
+const DK_ET_OFFSET_MS = -4 * 60 * 60 * 1000; // EDT = UTC-4 (March–November)
+
+function formatDkGameInfo(competition: { name?: string; startTime?: string }): string {
+  const name = (competition.name ?? "").replace(" @ ", "@").replace(/ /g, "");
+  if (!competition.startTime) return name;
+  try {
+    const et = new Date(new Date(competition.startTime).getTime() + DK_ET_OFFSET_MS);
+    const mm = String(et.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(et.getUTCDate()).padStart(2, "0");
+    const yyyy = et.getUTCFullYear();
+    const hh = et.getUTCHours();
+    const min = String(et.getUTCMinutes()).padStart(2, "0");
+    const ampm = hh >= 12 ? "PM" : "AM";
+    const h12 = String(hh % 12 || 12).padStart(2, "0");
+    return `${name} ${mm}/${dd}/${yyyy} ${h12}:${min}${ampm} ET`;
+  } catch {
+    return name;
+  }
+}
+
+async function fetchDkDraftables(draftGroupId: number): Promise<Array<{
+  name: string; dkId: number; teamAbbrev: string;
+  eligiblePositions: string; salary: number; gameInfo: string; avgFptsDk: number | null;
+}>> {
+  const res = await fetch(
+    `https://api.draftkings.com/draftgroups/v1/draftgroups/${draftGroupId}/draftables`,
+    { cache: "no-store" }
+  );
+  if (!res.ok) throw new Error(`DK API returned ${res.status} for draftGroupId ${draftGroupId}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = await res.json() as { draftables?: any[] };
+  const raw = data.draftables ?? [];
+
+  // Group by playerId; take lowest rosterSlotId as canonical (primary position)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const byPlayer = new Map<number, any[]>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const e of raw as any[]) {
+    if (!byPlayer.has(e.playerId)) byPlayer.set(e.playerId, []);
+    byPlayer.get(e.playerId)!.push(e);
+  }
+
+  return Array.from(byPlayer.values()).map((entries) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    entries.sort((a: any, b: any) => a.rosterSlotId - b.rosterSlotId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const c = entries[0] as any;
+    const pos: string = c.position ?? "UTIL";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const avgAttr = (c.draftStatAttributes ?? []).find((a: any) => a.id === DK_PROJ_STAT_ID);
+    return {
+      name: (c.displayName ?? "") as string,
+      dkId: c.draftableId as number,
+      teamAbbrev: ((c.teamAbbreviation ?? "") as string).toUpperCase(),
+      eligiblePositions: pos !== "UTIL" ? `${pos}/UTIL` : "UTIL",
+      salary: (c.salary ?? 0) as number,
+      gameInfo: formatDkGameInfo((c.competition ?? {}) as { name?: string; startTime?: string }),
+      avgFptsDk: avgAttr ? (parseFloat(avgAttr.value) || null) : null,
+    };
+  });
+}
+
+// ── loadSlateFromApi server action ───────────────────────────
+
+export async function loadSlateFromApi(
+  idType: "contest" | "draftGroup",
+  id: number
+): Promise<{
+  success: boolean;
+  message: string;
+  slateDate?: string;
+  gameCount?: number;
+  playerCount?: number;
+  teams?: string[];
+  lockTime?: string;
+  draftGroupId?: number;
+}> {
+  try {
+    // Resolve draftGroupId
+    let draftGroupId = id;
+    if (idType === "contest") {
+      const res = await fetch(
+        `https://api.draftkings.com/contests/v1/contests/${id}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error(`DK contests API returned ${res.status}`);
+      const data = await res.json() as { contestDetail: { draftGroupId: number } };
+      draftGroupId = data.contestDetail.draftGroupId;
+    }
+
+    const dkPlayerList = await fetchDkDraftables(draftGroupId);
+    if (dkPlayerList.length === 0) {
+      return { success: false, message: "No players returned — check your ID." };
+    }
+
+    // Extract slate date and game info
+    let slateDate = new Date().toISOString().slice(0, 10);
+    let lockTime: string | undefined;
+    for (const p of dkPlayerList) {
+      const m = p.gameInfo.match(/(\d{2}\/\d{2}\/\d{4})/);
+      if (m) {
+        const [mm, dd, yyyy] = m[1].split("/");
+        slateDate = `${yyyy}-${mm}-${dd}`;
+        const parts = p.gameInfo.split(" ");
+        if (parts.length >= 3) lockTime = `${parts[1]} ${parts[2]}`;
+        break;
+      }
+    }
+
+    const gameKeys = new Set(dkPlayerList.map((p) => p.gameInfo.split(" ")[0]).filter(Boolean));
+    const gameCount = gameKeys.size;
+    const uniqueTeams = Array.from(new Set(dkPlayerList.map((p) => p.teamAbbrev))).sort();
+
+    // ── Same DB pipeline as processDkSlate, empty LineStar map ──
+    const [slateRow] = await db
+      .insert(dkSlates)
+      .values({ slateDate, gameCount })
+      .onConflictDoUpdate({
+        target: dkSlates.slateDate,
+        set: { gameCount },
+      })
+      .returning({ id: dkSlates.id });
+    const slateId = slateRow.id;
+
+    const allTeams = await db
+      .select({ teamId: teams.teamId, name: teams.name, torvikName: teams.torvikName, ncaaName: teams.ncaaName, shortName: teams.shortName })
+      .from(teams);
+
+    const teamCache = new Map<string, number>();
+    for (const t of allTeams) {
+      for (const n of [t.name, t.torvikName, t.ncaaName, t.shortName]) {
+        if (n) teamCache.set(n.toLowerCase(), t.teamId);
+      }
+    }
+
+    const allRatings = await db
+      .select({ teamId: torvikRatings.teamId, adjTempo: torvikRatings.adjTempo, adjDe: torvikRatings.adjDe })
+      .from(torvikRatings)
+      .where(eq(torvikRatings.season, CURRENT_SEASON));
+    const ratingsMap = new Map(allRatings.map((r) => [r.teamId, r]));
+
+    const activeMatchups = await db
+      .select({ id: bracketMatchups.id, teamAId: bracketMatchups.teamAId, teamBId: bracketMatchups.teamBId, modelProbA: bracketMatchups.modelProbA, vegasProbA: bracketMatchups.vegasProbA })
+      .from(bracketMatchups)
+      .where(and(eq(bracketMatchups.season, CURRENT_SEASON), isNull(bracketMatchups.winnerId)));
+
+    const matchupByTeam = new Map<number, (typeof activeMatchups)[0]>();
+    for (const m of activeMatchups) {
+      matchupByTeam.set(m.teamAId, m);
+      matchupByTeam.set(m.teamBId, m);
+    }
+
+    type PlayerStatRecord = {
+      name: string; teamId: number; minPct: number | null; usageRate: number | null;
+      ppg: number | null; rpg: number | null; apg: number | null;
+      stlPct: number | null; blkPct: number | null; tovPct: number | null;
+    };
+
+    const tournamentTeamIds = [...new Set(activeMatchups.flatMap((m) => [m.teamAId, m.teamBId]))];
+    const allPlayerStats: PlayerStatRecord[] = tournamentTeamIds.length > 0
+      ? (await db.execute<PlayerStatRecord>(sql`
+          SELECT name, team_id as "teamId", min_pct as "minPct", usage_rate as "usageRate",
+                 ppg, rpg, apg, stl_pct as "stlPct", blk_pct as "blkPct", tov_pct as "tovPct"
+          FROM player_stats
+          WHERE season = ${CURRENT_SEASON}
+            AND team_id IN (${sql.join(tournamentTeamIds.map((id) => sql`${id}`), sql`, `)})
+        `)).rows
+      : [];
+
+    const statsByTeam = new Map<number, PlayerStatRecord[]>();
+    for (const ps of allPlayerStats) {
+      if (!statsByTeam.has(ps.teamId)) statsByTeam.set(ps.teamId, []);
+      statsByTeam.get(ps.teamId)!.push(ps);
+    }
+
+    // Save each player (no LineStar — linestarProj and projOwnPct will be NULL)
+    for (const p of dkPlayerList) {
+      const teamId = matchTeamId(p.teamAbbrev, teamCache);
+      const matchup = teamId ? matchupByTeam.get(teamId) : null;
+
+      let winProb: number | null = null;
+      let vegasWinProb: number | null = null;
+      if (matchup && teamId) {
+        winProb = matchup.teamAId === teamId ? matchup.modelProbA : (matchup.modelProbA != null ? 1 - matchup.modelProbA : null);
+        vegasWinProb = matchup.teamAId === teamId ? matchup.vegasProbA : (matchup.vegasProbA != null ? 1 - matchup.vegasProbA : null);
+      }
+
+      let matchedStats: PlayerStatRecord | null = null;
+      if (teamId) {
+        let bestDist = 5;
+        for (const ps of statsByTeam.get(teamId) ?? []) {
+          const dist = levenshtein(p.name.toLowerCase(), ps.name.toLowerCase());
+          if (dist < bestDist) { bestDist = dist; matchedStats = ps; }
+        }
+      }
+
+      let ourProj: number | null = null;
+      if (matchedStats && teamId && matchup && winProb != null) {
+        const oppId = matchup.teamAId === teamId ? matchup.teamBId : matchup.teamAId;
+        ourProj = computeOurProjection(
+          matchedStats,
+          ratingsMap.get(teamId)?.adjTempo ?? LEAGUE_AVG_TEMPO,
+          ratingsMap.get(oppId)?.adjTempo ?? LEAGUE_AVG_TEMPO,
+          ratingsMap.get(oppId)?.adjDe ?? LEAGUE_AVG_ADJE,
+          winProb
+        );
+      }
+
+      await db
+        .insert(dkPlayers)
+        .values({
+          slateId,
+          dkPlayerId: p.dkId,
+          name: p.name,
+          teamAbbrev: p.teamAbbrev,
+          eligiblePositions: p.eligiblePositions,
+          salary: p.salary,
+          teamId: teamId ?? undefined,
+          matchupId: matchup?.id ?? undefined,
+          gameInfo: p.gameInfo,
+          avgFptsDk: p.avgFptsDk,
+          linestarProj: null,
+          projOwnPct: null,
+          ourProj,
+          ourLeverage: null,
+        })
+        .onConflictDoUpdate({
+          target: [dkPlayers.slateId, dkPlayers.dkPlayerId],
+          set: {
+            salary: p.salary,
+            avgFptsDk: p.avgFptsDk ?? undefined,
+            teamId: teamId ?? undefined,
+            matchupId: matchup?.id ?? undefined,
+            ourProj: ourProj ?? undefined,
+          },
+        });
+    }
+
+    revalidatePath("/dfs");
+    return {
+      success: true,
+      message: `Loaded ${dkPlayerList.length} players for ${slateDate} (${gameCount} games)`,
+      slateDate,
+      gameCount,
+      playerCount: dkPlayerList.length,
+      teams: uniqueTeams,
+      lockTime,
+      draftGroupId,
+    };
+  } catch (err) {
+    console.error("loadSlateFromApi error:", err);
+    return { success: false, message: String(err) };
+  }
 }

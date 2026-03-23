@@ -10,15 +10,16 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow, LineupStrategyRow } from "@/db/queries";
+import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow, LineupStrategyRow, StrategySummaryRow } from "@/db/queries";
 import type { GeneratedLineup, OptimizerSettings } from "./optimizer";
-import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups } from "./actions";
+import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups, loadSlateFromApi } from "./actions";
 
 type Props = {
   players: DkPlayerRow[];
   slateDate: string | null;
   accuracy: { metrics: DfsAccuracyMetrics; players: DfsAccuracyRow[] } | null;
   comparison: LineupStrategyRow[];
+  strategySummary: StrategySummaryRow[];
 };
 
 type SortCol =
@@ -50,7 +51,7 @@ function formatDate(gameInfo: string | null): string {
   return `${mm}/${dd}`;
 }
 
-export default function DfsClient({ players, slateDate, accuracy, comparison }: Props) {
+export default function DfsClient({ players, slateDate, accuracy, comparison, strategySummary }: Props) {
   const [isPending, startTransition] = useTransition();
 
   // ── Upload state ─────────────────────────────────────────
@@ -58,6 +59,13 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
   const [lsUploadMsg, setLsUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const dkFileRef = useRef<HTMLInputElement>(null);
   const lsFileRef = useRef<HTMLInputElement>(null);
+
+  // ── API load state ────────────────────────────────────────
+  const [apiId, setApiId] = useState("");
+  const [apiMsg, setApiMsg] = useState<{
+    ok: boolean; text: string;
+    gameCount?: number; playerCount?: number; lockTime?: string; teams?: string[];
+  } | null>(null);
 
   // ── Game / filter state ───────────────────────────────────
   const allGameKeys = useMemo(() => {
@@ -221,6 +229,29 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
     });
   };
 
+  const handleApiLoad = () => {
+    const trimmed = apiId.trim();
+    if (!trimmed || isNaN(Number(trimmed))) {
+      setApiMsg({ ok: false, text: "Enter a numeric Contest ID or Draft Group ID." });
+      return;
+    }
+    const numId = Number(trimmed);
+    // Contest IDs are typically 9 digits; draft group IDs are typically 6 digits
+    const idType = trimmed.length >= 9 ? "contest" : "draftGroup";
+    setApiMsg(null);
+    startTransition(async () => {
+      const res = await loadSlateFromApi(idType, numId);
+      setApiMsg({
+        ok: res.success,
+        text: res.message,
+        gameCount: res.gameCount,
+        playerCount: res.playerCount,
+        lockTime: res.lockTime,
+        teams: res.teams,
+      });
+    });
+  };
+
   const handleOptimize = async () => {
     if (filteredPlayers.length < 8) return;
     setIsOptimizing(true);
@@ -294,8 +325,7 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
           <CardHeader>
             <CardTitle className="text-base">Load Your Slate</CardTitle>
             <CardDescription>
-              Upload both CSVs to create the player pool, or run{" "}
-              <code className="font-mono text-xs">python -m ingest.dk_slate --dk DKSalaries.csv --linestar LineStar.csv</code> via CLI.
+              Paste a DK Contest ID to load salaries automatically, or upload the DK salary CSV + LineStar CSV.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -308,6 +338,10 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
               dkMessage={dkUploadMsg}
               lsMessage={lsUploadMsg}
               hasSlate={false}
+              apiId={apiId}
+              onApiIdChange={setApiId}
+              onApiLoad={handleApiLoad}
+              apiMessage={apiMsg}
             />
           </CardContent>
         </Card>
@@ -344,6 +378,10 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
             dkMessage={dkUploadMsg}
             lsMessage={lsUploadMsg}
             hasSlate={true}
+            apiId={apiId}
+            onApiIdChange={setApiId}
+            onApiLoad={handleApiLoad}
+            apiMessage={apiMsg}
           />
         </CardContent>
       </Card>
@@ -616,8 +654,11 @@ export default function DfsClient({ players, slateDate, accuracy, comparison }: 
       {/* Accuracy Panel — only shown when actuals have been ingested */}
       {accuracy && <AccuracyPanel metrics={accuracy.metrics} players={accuracy.players} />}
 
-      {/* Strategy Comparison Panel — shown whenever lineups have been saved to DB */}
+      {/* Single-slate strategy comparison */}
       {comparison.length > 0 && <ComparisonPanel rows={comparison} />}
+
+      {/* Cross-slate strategy tracker — shows once any strategy has actuals */}
+      {strategySummary.length > 0 && <StrategySummaryPanel rows={strategySummary} />}
     </div>
   );
 }
@@ -633,6 +674,10 @@ function SplitUploadPanel({
   dkMessage,
   lsMessage,
   hasSlate,
+  apiId,
+  onApiIdChange,
+  onApiLoad,
+  apiMessage,
 }: {
   dkFileRef: React.RefObject<HTMLInputElement | null>;
   lsFileRef: React.RefObject<HTMLInputElement | null>;
@@ -642,8 +687,13 @@ function SplitUploadPanel({
   dkMessage: { ok: boolean; text: string } | null;
   lsMessage: { ok: boolean; text: string } | null;
   hasSlate: boolean;
+  apiId: string;
+  onApiIdChange: (v: string) => void;
+  onApiLoad: () => void;
+  apiMessage: { ok: boolean; text: string; gameCount?: number; playerCount?: number; lockTime?: string; teams?: string[] } | null;
 }) {
   return (
+    <div className="space-y-4">
     <div className="grid gap-4 sm:grid-cols-2">
       {/* DK Salaries — load full slate */}
       <div className="space-y-2 rounded-lg border p-3">
@@ -686,6 +736,46 @@ function SplitUploadPanel({
           </p>
         )}
       </div>
+    </div>
+
+    {/* DK API loader — no CSV download needed */}
+    <div className="rounded-lg border border-dashed p-3 space-y-2">
+      <p className="text-xs font-medium">
+        Load via DK API
+        <span className="ml-1 text-muted-foreground font-normal">— no CSV download needed</span>
+      </p>
+      <p className="text-[11px] text-muted-foreground">
+        Paste your Contest ID (from the DK contest URL) or Draft Group ID. Salaries and positions load automatically.
+      </p>
+      <div className="flex gap-2 items-center">
+        <input
+          type="text"
+          inputMode="numeric"
+          placeholder="Contest ID or Draft Group ID"
+          value={apiId}
+          onChange={(e) => onApiIdChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onApiLoad()}
+          className="flex-1 rounded border bg-background px-2 py-1 text-xs font-mono"
+        />
+        <Button size="sm" variant="outline" onClick={onApiLoad} disabled={isPending || !apiId.trim()}>
+          {isPending ? "Loading…" : "Fetch Slate"}
+        </Button>
+      </div>
+      {apiMessage && (
+        <div className={`text-xs ${apiMessage.ok ? "text-green-600" : "text-red-500"}`}>
+          <p>{apiMessage.text}</p>
+          {apiMessage.ok && apiMessage.gameCount != null && (
+            <p className="text-muted-foreground mt-0.5">
+              {apiMessage.gameCount} games · {apiMessage.playerCount} players
+              {apiMessage.lockTime && ` · First lock ${apiMessage.lockTime}`}
+            </p>
+          )}
+          {apiMessage.ok && apiMessage.teams && apiMessage.teams.length > 0 && (
+            <p className="text-muted-foreground font-mono">{apiMessage.teams.join(" · ")}</p>
+          )}
+        </div>
+      )}
+    </div>
     </div>
   );
 }
@@ -936,6 +1026,92 @@ function ComparisonPanel({ rows }: { rows: LineupStrategyRow[] }) {
             Run <code className="rounded bg-muted px-1 py-0.5">python -m ingest.dk_results --results DKResults.csv</code> after the slate to fill in actuals.
           </p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Cross-slate strategy tracker ─────────────────────────────
+
+const STRATEGY_COLORS: Record<string, string> = {
+  gpp_standard:   "bg-blue-500/10 text-blue-700",
+  upset_stack:    "bg-orange-500/10 text-orange-700",
+  value_leverage: "bg-purple-500/10 text-purple-700",
+};
+
+function StrategySummaryPanel({ rows }: { rows: StrategySummaryRow[] }) {
+  const leader = rows.reduce((best, r) =>
+    (r.avgActualFpts ?? -Infinity) > (best.avgActualFpts ?? -Infinity) ? r : best
+  );
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Strategy Tracker — All Slates</CardTitle>
+        <CardDescription className="text-xs">
+          Cumulative performance across every slate with results. Updates automatically after each{" "}
+          <code className="rounded bg-muted px-1 py-0.5">dk_results</code> ingest.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="px-2 py-1">Strategy</th>
+                <th className="px-2 py-1 text-right">Slates</th>
+                <th className="px-2 py-1 text-right">Lineups</th>
+                <th className="px-2 py-1 text-right">Avg Actual</th>
+                <th className="px-2 py-1 text-right">Cash Rate</th>
+                <th className="px-2 py-1 text-right">Best Lineup</th>
+                <th className="px-2 py-1 text-right">Avg Leverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const isLeader = leader.strategy === r.strategy;
+                const colorClass = STRATEGY_COLORS[r.strategy] ?? "bg-muted/20";
+                return (
+                  <tr
+                    key={r.strategy}
+                    className={`border-b ${isLeader ? "bg-green-500/5" : "hover:bg-muted/30"}`}
+                  >
+                    <td className="px-2 py-1">
+                      <span className={`rounded px-1.5 py-0.5 font-medium ${colorClass}`}>
+                        {r.strategy}
+                      </span>
+                      {isLeader && (
+                        <Badge className="ml-1.5 bg-green-500/20 text-green-700 text-[10px]">
+                          leading
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">{r.nSlates}</td>
+                    <td className="px-2 py-1 text-right font-mono">{r.totalLineups}</td>
+                    <td className="px-2 py-1 text-right font-mono font-medium">
+                      {r.avgActualFpts?.toFixed(1) ?? "–"}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">
+                      {r.cashRate != null ? `${r.cashRate}%` : "–"}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">
+                      {r.bestSingleLineup?.toFixed(1) ?? "–"}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">
+                      {r.avgLeverage?.toFixed(1) ?? "–"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Cash threshold: 232 FPTS (NCAA R32). Strategies: {" "}
+          <span className="text-blue-700">gpp_standard</span> (25–82% win prob),{" "}
+          <span className="text-orange-700">upset_stack</span> (12–38% underdog),{" "}
+          <span className="text-purple-700">value_leverage</span> (no stack baseline).
+        </p>
       </CardContent>
     </Card>
   );

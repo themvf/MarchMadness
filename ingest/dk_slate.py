@@ -48,9 +48,9 @@ DK_ABBREV_OVERRIDES: dict[str, str] = {
     "TCU": "TCU",
     "KU": "Kansas",
     "KSAS": "Kansas",
-    "STJ": "St. John's (NY)",
-    "STJN": "St. John's (NY)",
-    "STJS": "St. John's (NY)",
+    "STJ": "St. John's",
+    "STJN": "St. John's",
+    "STJS": "St. John's",
     "CONN": "Connecticut",
     "CCONN": "Connecticut",
     "UCONN": "Connecticut",
@@ -340,10 +340,14 @@ def build_player_pool(
         result["our_proj"] = our_proj
 
         # --- Leverage ---
+        # Use our_proj when available; fall back to linestar_proj so players
+        # without a stat match (can't compute our_proj) are still visible to
+        # the GPP optimizer rather than silently excluded.
+        proj_for_leverage = our_proj or result.get("linestar_proj")
         our_leverage = None
-        if our_proj and result.get("proj_own_pct") is not None:
+        if proj_for_leverage and result.get("proj_own_pct") is not None:
             our_leverage = compute_leverage(
-                our_proj,
+                proj_for_leverage,
                 result["proj_own_pct"],
                 win_prob,
                 vegas_win_prob,
@@ -380,20 +384,50 @@ def _safe_float(val) -> float | None:
         return None
 
 
-def run(dk_path: str, linestar_path: str, date_override: str | None = None,
-        season: int = 2026) -> None:
-    """Main pipeline: parse CSVs → compute projections → save to DB."""
+def run(
+    dk_path: str | None = None,
+    linestar_path: str | None = None,
+    draft_group_id: int | None = None,
+    contest_id: int | None = None,
+    date_override: str | None = None,
+    season: int = 2026,
+) -> None:
+    """Main pipeline: fetch/parse DK data → compute projections → save to DB.
+
+    DK player source (one required):
+        dk_path        — path to manually downloaded DK salary CSV
+        draft_group_id — fetch from DK API using draftGroupId
+        contest_id     — resolve to draftGroupId via API, then fetch
+
+    LineStar source (optional):
+        linestar_path  — path to LineStar projections CSV
+        If omitted, linestar_proj and proj_own_pct will be NULL for all players.
+    """
     config = load_config()
     db = DatabaseManager(config.database_url)
 
-    with open(dk_path, encoding="utf-8-sig") as f:
-        dk_content = f.read()
-    with open(linestar_path, encoding="utf-8-sig") as f:
-        ls_content = f.read()
+    # ── DK player source ─────────────────────────────────────
+    if draft_group_id or contest_id:
+        from ingest.dk_api import fetch_dk_players, fetch_draft_group_id as _resolve_dgid
+        dgid = draft_group_id or _resolve_dgid(contest_id)
+        dk_players = fetch_dk_players(dgid)
+        print(f"API: {len(dk_players)} players fetched from draftGroupId {dgid}")
+    elif dk_path:
+        with open(dk_path, encoding="utf-8-sig") as f:
+            dk_players = parse_dk_csv(f.read())
+        print(f"CSV: {len(dk_players)} DK players parsed")
+    else:
+        raise ValueError("Provide --dk, --draft-group-id, or --contest-id")
 
-    dk_players = parse_dk_csv(dk_content)
-    linestar_map = parse_linestar_csv(ls_content)
-    print(f"Parsed {len(dk_players)} DK players, {len(linestar_map)} LineStar entries")
+    # ── LineStar source (optional) ───────────────────────────
+    if linestar_path:
+        with open(linestar_path, encoding="utf-8-sig") as f:
+            ls_content = f.read()
+        linestar_map = parse_linestar_csv(ls_content)
+        print(f"LineStar: {len(linestar_map)} entries parsed")
+    else:
+        linestar_map = {}
+        print("LineStar: not provided — linestar_proj and proj_own_pct will be NULL")
 
     # Determine slate date
     slate_date = date_override
@@ -449,10 +483,48 @@ def run(dk_path: str, linestar_path: str, date_override: str | None = None,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Ingest DK + LineStar DFS data")
-    parser.add_argument("--dk", required=True, help="Path to DraftKings salary CSV")
-    parser.add_argument("--linestar", required=True, help="Path to LineStar projections CSV")
+    parser = argparse.ArgumentParser(
+        description="Ingest DK + LineStar DFS data",
+        epilog=(
+            "DK source (one required):\n"
+            "  --dk               manually downloaded DK salary CSV\n"
+            "  --draft-group-id   fetch from DK API (no CSV needed)\n"
+            "  --contest-id       resolve draftGroupId from contestId, then fetch\n\n"
+            "Examples:\n"
+            "  # Classic CSV workflow:\n"
+            "  python -m ingest.dk_slate --dk DKSalaries.csv --linestar LineStar.csv\n\n"
+            "  # API workflow (no DK CSV download needed):\n"
+            "  python -m ingest.dk_slate --draft-group-id 144324 --linestar LineStar.csv\n\n"
+            "  # API workflow with contest ID from DK lobby URL:\n"
+            "  python -m ingest.dk_slate --contest-id 189058648 --linestar LineStar.csv\n\n"
+            "  # Fully automated (no CSV files at all — own% will be NULL):\n"
+            "  python -m ingest.dk_slate --draft-group-id 144324\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # DK player source — mutually exclusive, one required
+    dk_source = parser.add_mutually_exclusive_group(required=True)
+    dk_source.add_argument("--dk", help="Path to DraftKings salary CSV")
+    dk_source.add_argument(
+        "--draft-group-id", type=int, metavar="ID",
+        help="DK draftGroupId — fetch player pool from API (no CSV needed)",
+    )
+    dk_source.add_argument(
+        "--contest-id", type=int, metavar="ID",
+        help="DK contestId — resolves to draftGroupId, then fetches from API",
+    )
+
+    parser.add_argument("--linestar", help="Path to LineStar projections CSV (optional)")
     parser.add_argument("--date", help="Slate date override (YYYY-MM-DD)")
     parser.add_argument("--season", type=int, default=2026)
     args = parser.parse_args()
-    run(args.dk, args.linestar, args.date, args.season)
+
+    run(
+        dk_path=args.dk,
+        linestar_path=args.linestar,
+        draft_group_id=args.draft_group_id,
+        contest_id=args.contest_id,
+        date_override=args.date,
+        season=args.season,
+    )
