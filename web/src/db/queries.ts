@@ -997,6 +997,7 @@ export type LineupStrategyRow = {
   topStack: string | null;
 };
 
+/** Single-slate comparison (latest slate by default). */
 export async function getDkLineupComparison(): Promise<LineupStrategyRow[]> {
   const result = await db.execute<LineupStrategyRow>(sql`
     SELECT
@@ -1010,6 +1011,88 @@ export async function getDkLineupComparison(): Promise<LineupStrategyRow[]> {
     WHERE dl.slate_id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
     GROUP BY dl.strategy
     ORDER BY AVG(dl.actual_fpts) DESC NULLS LAST, dl.strategy
+  `);
+  return result.rows;
+}
+
+// ── Cross-Slate Strategy Tracker ───────────────────────────
+
+export type CrossSlateRow = {
+  strategy: string;
+  slateDate: string;
+  nLineups: number;
+  avgProjFpts: number | null;
+  avgActualFpts: number | null;
+  nCashed: number;        // lineups >= cash_threshold (232 for NCAA R32)
+  bestLineup: number | null;
+  avgLeverage: number | null;
+};
+
+/**
+ * Returns per-strategy, per-slate performance across all slates that have
+ * actual_fpts data. Used to track which strategy wins over time.
+ *
+ * cash_threshold: minimum actual FPTS to count as "cashed" (default 232 for
+ * NCAA R32 slates; adjust per sport/contest size in the web UI).
+ */
+export async function getDkCrossSlateComparison(
+  cashThreshold = 232
+): Promise<CrossSlateRow[]> {
+  const result = await db.execute<CrossSlateRow>(sql`
+    SELECT
+      dl.strategy,
+      ds.slate_date AS "slateDate",
+      COUNT(*)::int AS "nLineups",
+      AVG(dl.proj_fpts) AS "avgProjFpts",
+      AVG(dl.actual_fpts) AS "avgActualFpts",
+      COUNT(*) FILTER (WHERE dl.actual_fpts >= ${cashThreshold})::int AS "nCashed",
+      MAX(dl.actual_fpts) AS "bestLineup",
+      AVG(dl.leverage) AS "avgLeverage"
+    FROM dk_lineups dl
+    JOIN dk_slates ds ON ds.id = dl.slate_id
+    WHERE dl.actual_fpts IS NOT NULL
+    GROUP BY dl.strategy, ds.slate_date
+    ORDER BY ds.slate_date DESC, dl.strategy
+  `);
+  return result.rows;
+}
+
+export type StrategySummaryRow = {
+  strategy: string;
+  nSlates: number;
+  totalLineups: number;
+  avgActualFpts: number | null;
+  totalCashed: number;
+  cashRate: number | null;
+  bestSingleLineup: number | null;
+  avgLeverage: number | null;
+};
+
+/**
+ * Rolls up cross-slate data into a single summary row per strategy.
+ * Use this for the "leaderboard" view showing which strategy is winning
+ * across the full tournament.
+ */
+export async function getDkStrategySummary(
+  cashThreshold = 232
+): Promise<StrategySummaryRow[]> {
+  const result = await db.execute<StrategySummaryRow>(sql`
+    SELECT
+      dl.strategy,
+      COUNT(DISTINCT dl.slate_id)::int AS "nSlates",
+      COUNT(*)::int AS "totalLineups",
+      AVG(dl.actual_fpts) AS "avgActualFpts",
+      COUNT(*) FILTER (WHERE dl.actual_fpts >= ${cashThreshold})::int AS "totalCashed",
+      ROUND(
+        100.0 * COUNT(*) FILTER (WHERE dl.actual_fpts >= ${cashThreshold}) / COUNT(*),
+        1
+      ) AS "cashRate",
+      MAX(dl.actual_fpts) AS "bestSingleLineup",
+      AVG(dl.leverage) AS "avgLeverage"
+    FROM dk_lineups dl
+    WHERE dl.actual_fpts IS NOT NULL
+    GROUP BY dl.strategy
+    ORDER BY AVG(dl.actual_fpts) DESC NULLS LAST
   `);
   return result.rows;
 }

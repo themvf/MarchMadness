@@ -79,6 +79,11 @@ class DkPlayer:
     def is_f_eligible(self) -> bool:
         return "F" in self.eligible_positions
 
+    @property
+    def effective_proj(self) -> float | None:
+        """Best available projection: our model if matched, else LineStar fallback."""
+        return self.our_proj or self.linestar_proj
+
 
 @dataclass
 class Lineup:
@@ -156,93 +161,93 @@ def solve_one(
     previous: list[set[int]],
     max_filler_per_team: int = 3,
     forced: set[int] | None = None,
+    no_stack: bool = False,
 ) -> Lineup | None:
-    """Solve one lineup via PuLP binary ILP."""
+    """Solve one lineup via PuLP binary ILP.
 
-    # Build opponent map for bring-back constraints
-    opponent_map = build_game_pairs(pool)
+    Args:
+        no_stack: When True, bypass all team-stack and bring-back constraints.
+                  Used for the value_leverage strategy (pure leverage baseline).
+    """
 
-    # Teams eligible to be the PRIMARY stack (within win-prob window)
     team_pool: dict[str, list[DkPlayer]] = defaultdict(list)
     for p in pool:
         team_pool[p.team_abbrev].append(p)
 
-    # A team can be the primary stack if:
-    # 1. It has enough players in the eligible pool
-    # 2. Its win_prob is in the configured range (blowout protection)
-    def team_win_prob(team: str) -> float | None:
-        players = team_pool[team]
-        probs = [p.win_prob for p in players if p.win_prob is not None]
-        return sum(probs) / len(probs) if probs else None
-
-    stackable = []
-    for team, players in team_pool.items():
-        if len(players) < min_stack:
-            continue
-        wp = team_win_prob(team)
-        if wp is None or (stack_min_win_prob <= wp <= stack_max_win_prob):
-            stackable.append(team)
-
-    if not stackable:
-        # Fallback: allow all teams with enough players
-        stackable = [t for t, ps in team_pool.items() if len(ps) >= min_stack]
-
     prob = pulp.LpProblem("dk_cbb", pulp.LpMaximize)
-
     x = {p.id: pulp.LpVariable(f"x_{p.id}", cat="Binary") for p in pool}
-    z = {t: pulp.LpVariable(f"z_{t}", cat="Binary") for t in stackable}
 
-    score_fn = (lambda p: p.our_leverage or 0) if mode == "gpp" else (lambda p: p.our_proj or 0)
+    score_fn = (lambda p: p.our_leverage or 0) if mode == "gpp" else (lambda p: p.effective_proj or 0)
     prob += pulp.lpSum(score_fn(p) * x[p.id] for p in pool)
 
-    # Core constraints
+    # Core constraints (always active)
     prob += pulp.lpSum(x[p.id] for p in pool) == ROSTER_SIZE
     prob += pulp.lpSum(p.salary * x[p.id] for p in pool) <= SALARY_CAP
     prob += pulp.lpSum(x[p.id] for p in pool if p.is_g_eligible) >= MIN_G
     prob += pulp.lpSum(x[p.id] for p in pool if p.is_f_eligible) >= MIN_F
 
-    # Primary stack: at least one team has >= min_stack players
-    for t in stackable:
-        team_players = [p for p in pool if p.team_abbrev == t]
-        prob += (
-            pulp.lpSum(x[p.id] for p in team_players) - min_stack * z[t] >= 0,
-            f"stack_{t}",
-        )
-    prob += pulp.lpSum(z[t] for t in stackable) >= 1
-
-    # Bring-back: if team T is primary stack, require >= bring_back players
-    # from T's opponent in the same game.
-    if bring_back > 0:
-        for t in stackable:
-            opp = opponent_map.get(t)
-            if not opp:
-                continue
-            opp_players = [p for p in pool if p.team_abbrev == opp]
-            if len(opp_players) < bring_back:
-                continue
-            # sum(opp_players selected) - bring_back * z_T >= 0
-            prob += (
-                pulp.lpSum(x[p.id] for p in opp_players) - bring_back * z[t] >= 0,
-                f"bringback_{t}",
-            )
-
-    # Max players per team (prevents one non-stack team from filling all filler slots).
-    # For the primary-stack team: allowed up to ROSTER_SIZE when z[t]=1, else capped.
-    # For non-stackable teams: hard cap at max_filler_per_team.
+    # Max players per team — always apply to prevent single-team saturation
     for team, tplayers in team_pool.items():
-        if team in stackable:
+        prob += (
+            pulp.lpSum(x[p.id] for p in tplayers) <= max_filler_per_team,
+            f"maxteam_{team}",
+        )
+
+    if not no_stack:
+        # Build opponent map for bring-back constraints
+        opponent_map = build_game_pairs(pool)
+
+        def team_win_prob(team: str) -> float | None:
+            probs = [p.win_prob for p in team_pool[team] if p.win_prob is not None]
+            return sum(probs) / len(probs) if probs else None
+
+        stackable = [
+            t for t, ps in team_pool.items()
+            if len(ps) >= min_stack
+            and (lambda wp: wp is None or stack_min_win_prob <= wp <= stack_max_win_prob)(team_win_prob(t))
+        ]
+        if not stackable:
+            stackable = [t for t, ps in team_pool.items() if len(ps) >= min_stack]
+
+        z = {t: pulp.LpVariable(f"z_{t}", cat="Binary") for t in stackable}
+
+        # Primary stack: at least one team has >= min_stack players
+        for t in stackable:
+            team_players = [p for p in pool if p.team_abbrev == t]
+            prob += (
+                pulp.lpSum(x[p.id] for p in team_players) - min_stack * z[t] >= 0,
+                f"stack_{t}",
+            )
+        prob += pulp.lpSum(z[t] for t in stackable) >= 1
+
+        # Override max-team cap: the primary stack team may exceed filler cap
+        for t in stackable:
+            tplayers = team_pool[t]
+            # Remove the generic cap and replace with stack-aware version
+            del prob.constraints[f"maxteam_{t}"]
             prob += (
                 pulp.lpSum(x[p.id] for p in tplayers)
-                <= max_filler_per_team + (ROSTER_SIZE - max_filler_per_team) * z[team],
-                f"maxteam_{team}",
-            )
-        else:
-            prob += (
-                pulp.lpSum(x[p.id] for p in tplayers) <= max_filler_per_team,
-                f"maxteam_{team}",
+                <= max_filler_per_team + (ROSTER_SIZE - max_filler_per_team) * z[t],
+                f"maxteam_{t}",
             )
 
-    # Forced inclusions (minimum-exposure guarantee for top-projected players)
+        # Bring-back: if team T is primary stack, require >= bring_back from opponent
+        if bring_back > 0:
+            for t in stackable:
+                opp = opponent_map.get(t)
+                if not opp:
+                    continue
+                opp_players = [p for p in pool if p.team_abbrev == opp]
+                if len(opp_players) < bring_back:
+                    continue
+                prob += (
+                    pulp.lpSum(x[p.id] for p in opp_players) - bring_back * z[t] >= 0,
+                    f"bringback_{t}",
+                )
+    else:
+        stackable = []
+
+    # Forced inclusions (minimum-exposure guarantee)
     if forced:
         for pid in forced:
             if pid in x:
@@ -273,18 +278,18 @@ def solve_one(
     if slots is None:
         return None
 
-    # Identify the stacked team
     stack_team = None
-    for t in stackable:
-        if pulp.value(z[t]) is not None and pulp.value(z[t]) > 0.5:
-            stack_team = t
-            break
+    if not no_stack:
+        for t in stackable:
+            if pulp.value(z[t]) is not None and pulp.value(z[t]) > 0.5:
+                stack_team = t
+                break
 
     return Lineup(
         players=selected,
         slots=slots,
         total_salary=sum(p.salary for p in selected),
-        proj_fpts=sum(p.our_proj or 0 for p in selected),
+        proj_fpts=sum(p.effective_proj or 0 for p in selected),
         leverage=sum(p.our_leverage or 0 for p in selected),
         stack_team=stack_team,
     )
@@ -305,11 +310,12 @@ def optimize(
     max_filler_per_team: int = 3,
     min_exposure_pct: float = 0.10,
     min_exposure_top_k: int = 5,
+    no_stack: bool = False,
 ) -> list[Lineup]:
     eligible = [
         p for p in pool
-        if (p.our_leverage if mode == "gpp" else p.our_proj) is not None
-        and (p.our_leverage if mode == "gpp" else p.our_proj) > 0
+        if (p.our_leverage if mode == "gpp" else p.effective_proj) is not None
+        and (p.our_leverage if mode == "gpp" else p.effective_proj) > 0
         and p.salary > 0
     ]
     if len(eligible) < ROSTER_SIZE:
@@ -322,33 +328,36 @@ def optimize(
     for p in eligible:
         team_pool[p.team_abbrev].append(p)
 
-    print(f"\n-- Stackable teams (win prob {stack_min_win_prob:.0%}-{stack_max_win_prob:.0%}) --")
-    any_stackable = False
-    for team, players in sorted(team_pool.items()):
-        if len(players) < min_stack:
-            continue
-        wp_vals = [p.win_prob for p in players if p.win_prob is not None]
-        wp = sum(wp_vals) / len(wp_vals) if wp_vals else None
-        in_range = wp is not None and stack_min_win_prob <= wp <= stack_max_win_prob
-        opp = opponent_map.get(team, "?")
-        marker = "  [PRIMARY]" if in_range else "  [skip - outside win-prob range]"
-        wp_str = f"{wp*100:.0f}%" if wp is not None else "N/A"
-        print(f"  {team:<8} vs {opp:<8}  win_prob={wp_str:<5}  n_eligible={len(players)}{marker}")
-        if in_range:
-            any_stackable = True
+    if no_stack:
+        print(f"\n-- No-stack mode (value_leverage baseline) --")
+    else:
+        print(f"\n-- Stackable teams (win prob {stack_min_win_prob:.0%}-{stack_max_win_prob:.0%}) --")
+        any_stackable = False
+        for team, players in sorted(team_pool.items()):
+            if len(players) < min_stack:
+                continue
+            wp_vals = [p.win_prob for p in players if p.win_prob is not None]
+            wp = sum(wp_vals) / len(wp_vals) if wp_vals else None
+            in_range = wp is not None and stack_min_win_prob <= wp <= stack_max_win_prob
+            opp = opponent_map.get(team, "?")
+            marker = "  [PRIMARY]" if in_range else "  [skip - outside win-prob range]"
+            wp_str = f"{wp*100:.0f}%" if wp is not None else "N/A"
+            print(f"  {team:<8} vs {opp:<8}  win_prob={wp_str:<5}  n_eligible={len(players)}{marker}")
+            if in_range:
+                any_stackable = True
+        if not any_stackable:
+            print("  NOTE: No teams in win-prob range — allowing all teams as primary stacks")
 
-    if not any_stackable:
-        print("  NOTE: No teams in win-prob range — allowing all teams as primary stacks")
-
+    stack_desc = "none" if no_stack else f">={min_stack}"
     print(f"\nGenerating {n} lineups from {len(eligible)} eligible players")
-    print(f"  mode={mode}, stack>={min_stack}, bring-back>={bring_back}, "
+    print(f"  mode={mode}, stack={stack_desc}, bring-back>={bring_back}, "
           f"max_exp={max_exposure_pct:.0%}, max_filler={max_filler_per_team}, "
           f"min_exp={min_exposure_pct:.0%}(top{min_exposure_top_k})")
 
     max_exp_count = math.ceil(n * max_exposure_pct)
     min_exp_count = math.ceil(n * min_exposure_pct) if min_exposure_pct > 0 else 0
-    # Top-K players by our_proj for minimum-exposure guarantee
-    top_k = sorted(eligible, key=lambda p: p.our_proj or 0, reverse=True)[:min_exposure_top_k]
+    # Top-K players by effective_proj for minimum-exposure guarantee
+    top_k = sorted(eligible, key=lambda p: p.effective_proj or 0, reverse=True)[:min_exposure_top_k]
 
     exposure_count: dict[int, int] = {p.id: 0 for p in eligible}
     previous: list[set[int]] = []
@@ -371,6 +380,7 @@ def optimize(
             max_exp_count, exposure_count, previous,
             max_filler_per_team=max_filler_per_team,
             forced=forced or None,
+            no_stack=no_stack,
         )
         if lineup is None:
             print(f"  Stopped at lineup {i+1}: no more feasible lineups")
@@ -508,6 +518,7 @@ def run(
     max_filler_per_team: int = 3,
     min_exposure_pct: float = 0.10,
     min_exposure_top_k: int = 5,
+    no_stack: bool = False,
 ) -> None:
     config = load_config()
     db = DatabaseManager(config.database_url)
@@ -565,6 +576,7 @@ def run(
         pool, n, mode, min_stack, bring_back, max_exposure,
         stack_min_win_prob, stack_max_win_prob,
         max_filler_per_team, min_exposure_pct, min_exposure_top_k,
+        no_stack=no_stack,
     )
     if not lineups:
         print("No lineups generated.")
@@ -582,21 +594,22 @@ def run(
     print(f"  Avg proj FPTS     : {avg_proj:.1f}")
     print(f"  Avg leverage score: {avg_lev:.1f}")
 
-    csv_content = build_filled_csv(lineups, entries_path)
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        f.write(csv_content)
-    print(f"\nSaved {len(lineups)} lineups -> {out_path}")
-
     if save:
         label = strategy or f"{mode}_stack{min_stack}"
         save_lineups(db, slate["id"], label, lineups)
+
+    if entries_path:
+        csv_content = build_filled_csv(lineups, entries_path)
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            f.write(csv_content)
+        print(f"\nSaved {len(lineups)} lineups -> {out_path}")
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Generate DK CBB lineups")
-    parser.add_argument("--entries", required=True, help="DK multi-entry template CSV")
-    parser.add_argument("--out", required=True, help="Output CSV path")
+    parser.add_argument("--entries", default=None, help="DK multi-entry template CSV (optional; skip to save-only)")
+    parser.add_argument("--out", default=None, help="Output CSV path (required when --entries provided)")
     parser.add_argument("--n", type=int, default=100)
     parser.add_argument("--mode", choices=["gpp", "cash"], default="gpp")
     parser.add_argument("--stack", type=int, default=3, help="Min players from same team")
@@ -618,6 +631,8 @@ if __name__ == "__main__":
                         help="Min exposure for top-K projected players (default 0.10 = 10%%)")
     parser.add_argument("--min-exposure-top-k", type=int, default=5,
                         help="Apply min-exposure guarantee to top K players by projection (default 5)")
+    parser.add_argument("--no-stack", action="store_true",
+                        help="Disable all stack/bring-back constraints (value_leverage baseline)")
     args = parser.parse_args()
     run(
         args.entries, args.out, args.n, args.mode, args.stack,
@@ -625,4 +640,5 @@ if __name__ == "__main__":
         args.stack_min_prob, args.stack_max_prob,
         args.slate_date, args.strategy, args.save,
         args.max_filler_per_team, args.min_exposure, args.min_exposure_top_k,
+        no_stack=args.no_stack,
     )
