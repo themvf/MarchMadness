@@ -542,9 +542,16 @@ export async function refreshLinestarApi(
         });
       }
     } else {
-      // Slow path: discover periodId via GetPeriodInformation
+      // Slow path: discover periodId via GetPeriodInformation, then store it for next time
       const lsResult = await fetchLinestarData(draftGroupId, dnnCookie);
       lsMap = lsResult.data;
+      // Store discovered periodId so future refreshes skip GetPeriodInformation
+      if (lsResult.periodId && slateRows.rows[0]?.id) {
+        await db.execute(sql`
+          UPDATE dk_slates SET linestar_period_id = ${lsResult.periodId}
+          WHERE id = ${slateRows.rows[0].id}
+        `);
+      }
     }
 
     if (lsMap.size === 0) {
@@ -954,29 +961,35 @@ async function fetchLinestarData(
 }
 
 async function findLinestarPeriodId(draftGroupId: number, dnnCookie: string): Promise<number> {
-  // GetPeriodInformation — try without auth first, then with
-  const infoUrl = `${LS_BASE}/DesktopModules/DailyFantasyApi/API/Fantasy/GetPeriodInformation?site=${LS_SITE}&sport=${LS_SPORT}`;
-  let periodsData: unknown;
-  try {
-    const res = await fetch(infoUrl, { headers: LS_HEADERS, cache: "no-store" });
-    periodsData = await res.json();
-  } catch {
-    const res = await fetch(infoUrl, {
-      headers: { ...LS_HEADERS, Cookie: `.DOTNETNUKE=${dnnCookie}` },
-      cache: "no-store",
-    });
-    periodsData = await res.json();
+  // 1. Manual override via env var — use this when GetPeriodInformation fails
+  //    (it only returns upcoming slates; returns empty once games are in progress).
+  const envPeriodId = process.env.LINESTAR_PERIOD_ID;
+  if (envPeriodId) {
+    const pid = parseInt(envPeriodId, 10);
+    if (!isNaN(pid)) return pid;
   }
+
+  // 2. Call GetPeriodInformation WITH auth (always — unauthenticated returns HTTP 200
+  //    but with empty data, silently blocking the auth retry in a try/catch).
+  const infoUrl = `${LS_BASE}/DesktopModules/DailyFantasyApi/API/Fantasy/GetPeriodInformation?site=${LS_SITE}&sport=${LS_SPORT}`;
+  const headers: Record<string, string> = { ...LS_HEADERS };
+  if (dnnCookie) headers["Cookie"] = `.DOTNETNUKE=${dnnCookie}`;
+  const res = await fetch(infoUrl, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`GetPeriodInformation returned ${res.status}`);
+  const periodsData: unknown = await res.json();
 
   const periods: Array<{ PeriodId?: number; Id?: number }> = Array.isArray(periodsData)
     ? periodsData
     : ((periodsData as { Periods?: unknown[] }).Periods ?? []);
 
   if (!periods.length) {
-    throw new Error("GetPeriodInformation returned no periods");
+    throw new Error(
+      "GetPeriodInformation returned no periods — the slate may already be in progress. " +
+      "Set the LINESTAR_PERIOD_ID env var in Vercel to bypass discovery."
+    );
   }
 
-  // Scan most-recent periods until we find one whose Slates contain our draftGroupId
+  // 3. Scan most-recent periods until we find one whose Slates contain our draftGroupId
   for (const period of periods.slice(0, 10)) {
     const pid = period.PeriodId ?? period.Id;
     if (!pid) continue;
@@ -991,7 +1004,7 @@ async function findLinestarPeriodId(draftGroupId: number, dnnCookie: string): Pr
 
   throw new Error(
     `No LineStar slate found for DK draftGroupId ${draftGroupId}. ` +
-    "Slate may not be available on LineStar yet."
+    "Set the LINESTAR_PERIOD_ID env var in Vercel to bypass discovery."
   );
 }
 
