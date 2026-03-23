@@ -511,10 +511,46 @@ export async function refreshLinestarApi(
   }
 
   try {
-    const linestarData = await fetchLinestarData(draftGroupId, dnnCookie);
-    if (linestarData.size === 0) {
+    // Look up the stored LineStar periodId for this draft group — avoids re-discovery
+    // via GetPeriodInformation, which only returns upcoming/active slates (fails once
+    // games have started).
+    const slateRows = await db.execute<{ id: number; linestarPeriodId: number | null }>(sql`
+      SELECT id, linestar_period_id as "linestarPeriodId"
+      FROM dk_slates
+      WHERE dk_draft_group_id = ${draftGroupId}
+      ORDER BY slate_date DESC LIMIT 1
+    `);
+    const storedPeriodId = slateRows.rows[0]?.linestarPeriodId ?? null;
+
+    let lsMap: Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }>;
+    if (storedPeriodId) {
+      // Fast path: use stored periodId, call GetSalariesV5 directly
+      const data = await lsGetSalariesV5(storedPeriodId, dnnCookie);
+      const scj = (data.SalaryContainerJson as string | null | undefined) ?? "{}";
+      let container: { Salaries?: Array<{ Id: number; Name: string; SAL: number; PP: number; IS?: number; STAT?: number }> } = {};
+      try { container = JSON.parse(scj); } catch { /* ignore */ }
+      const ownershipBlock = (data.Ownership as { Projected?: Record<string, Array<{ SalaryId: number; Owned: number }>> } | undefined);
+      const ownershipMap = averageOwnershipBySalaryId(ownershipBlock?.Projected ?? {});
+      lsMap = new Map();
+      for (const p of (container.Salaries ?? [])) {
+        const proj = typeof p.PP === "number" ? p.PP : parseFloat(p.PP as unknown as string) || 0;
+        const ownPct = ownershipMap.get(p.Id) ?? 0;
+        lsMap.set(`${(p.Name ?? "").toLowerCase()}|${p.SAL}`, {
+          linestarProj: proj,
+          projOwnPct: ownPct,
+          isOut: p.IS === 1 || p.STAT === 4,
+        });
+      }
+    } else {
+      // Slow path: discover periodId via GetPeriodInformation
+      const lsResult = await fetchLinestarData(draftGroupId, dnnCookie);
+      lsMap = lsResult.data;
+    }
+
+    if (lsMap.size === 0) {
       return { success: false, message: "LineStar returned no players.", updated: 0 };
     }
+    const linestarData = lsMap;
 
     // Load current slate players with win probs for leverage recalc
     const rows = await db.execute<{
@@ -690,13 +726,13 @@ export async function loadSlateFromApi(
     const gameCount = gameKeys.size;
     const uniqueTeams = Array.from(new Set(dkPlayerList.map((p) => p.teamAbbrev))).sort();
 
-    // ── Same DB pipeline as processDkSlate, empty LineStar map ──
+    // ── Upsert slate row ──────────────────────────────────────
     const [slateRow] = await db
       .insert(dkSlates)
-      .values({ slateDate, gameCount })
+      .values({ slateDate, gameCount, dkDraftGroupId: draftGroupId })
       .onConflictDoUpdate({
         target: dkSlates.slateDate,
-        set: { gameCount },
+        set: { gameCount, dkDraftGroupId: draftGroupId },
       })
       .returning({ id: dkSlates.id });
     const slateId = slateRow.id;
@@ -753,13 +789,19 @@ export async function loadSlateFromApi(
     }
 
     // ── LineStar API fetch (if DNN_COOKIE env var is set) ──────
-    // Returns Map<"name_lower|salary" → {linestarProj, projOwnPct}>
     let linestarData: Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }> = new Map();
+    let linestarPeriodId: number | null = null;
     const dnnCookie = process.env.DNN_COOKIE;
     if (dnnCookie) {
       try {
-        linestarData = await fetchLinestarData(draftGroupId, dnnCookie);
-        console.log(`LineStar API: ${linestarData.size} players fetched`);
+        const lsResult = await fetchLinestarData(draftGroupId, dnnCookie);
+        linestarData = lsResult.data;
+        linestarPeriodId = lsResult.periodId;
+        console.log(`LineStar API: ${linestarData.size} players fetched (periodId=${linestarPeriodId})`);
+        // Store periodId in slate so refresh doesn't need to re-discover it
+        await db.update(dkSlates)
+          .set({ linestarPeriodId })
+          .where(eq(dkSlates.id, slateRow.id));
       } catch (lsErr) {
         console.warn("LineStar API fetch failed (continuing without it):", lsErr);
       }
@@ -880,7 +922,7 @@ const LS_HEADERS = {
 async function fetchLinestarData(
   draftGroupId: number,
   dnnCookie: string
-): Promise<Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }>> {
+): Promise<{ data: Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }>; periodId: number }> {
   const periodId = await findLinestarPeriodId(draftGroupId, dnnCookie);
   const data = await lsGetSalariesV5(periodId, dnnCookie);
 
@@ -908,7 +950,7 @@ async function fetchLinestarData(
     const key = `${(p.Name ?? "").toLowerCase()}|${p.SAL}`;
     result.set(key, { linestarProj: proj, projOwnPct: ownPct, isOut });
   }
-  return result;
+  return { data: result, periodId };
 }
 
 async function findLinestarPeriodId(draftGroupId: number, dnnCookie: string): Promise<number> {

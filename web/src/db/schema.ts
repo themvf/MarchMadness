@@ -299,6 +299,8 @@ export const dkSlates = pgTable("dk_slates", {
   id: serial("id").primaryKey(),
   slateDate: date("slate_date").notNull().unique(),
   gameCount: integer("game_count").default(0),
+  dkDraftGroupId: integer("dk_draft_group_id"),    // DK draftGroupId — stored on API load
+  linestarPeriodId: integer("linestar_period_id"),  // LineStar periodId — avoids re-discovery
   createdAt: timestamp("created_at").defaultNow(),
 });
 
