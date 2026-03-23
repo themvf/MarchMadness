@@ -295,14 +295,13 @@ def _build_linestar_map(
         proj = p["proj"]
         own_pct = ownership.get(p["id"], 0.0)
 
-        # Skip true scratches with no projection and no ownership
-        if proj == 0.0 and own_pct == 0.0 and p["is_out"]:
-            continue
-
+        # Include injured/out players with proj=0 so re-fetches overwrite stale
+        # DB values. The optimizer's score > 0 filter handles exclusion.
         key = (p["name"].lower(), p["salary"])
         linestar_map[key] = {
             "linestar_proj":  proj,
             "proj_own_pct":   own_pct,
+            "is_out":         p["is_out"],
         }
 
     return linestar_map

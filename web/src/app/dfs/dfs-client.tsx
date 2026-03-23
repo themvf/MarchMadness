@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { DkPlayerRow, DfsAccuracyMetrics, DfsAccuracyRow, LineupStrategyRow, StrategySummaryRow } from "@/db/queries";
 import type { GeneratedLineup, OptimizerSettings } from "./optimizer";
-import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups, loadSlateFromApi } from "./actions";
+import { processDkSlate, refreshLinestarProjs, runOptimizer, exportLineups, loadSlateFromApi, refreshLinestarApi } from "./actions";
 
 type Props = {
   players: DkPlayerRow[];
@@ -66,6 +66,8 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
     ok: boolean; text: string;
     gameCount?: number; playerCount?: number; lockTime?: string; teams?: string[];
   } | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // ── Game / filter state ───────────────────────────────────
   const allGameKeys = useMemo(() => {
@@ -252,6 +254,30 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
     });
   };
 
+  const handleRefreshLineStar = async () => {
+    const trimmed = apiId.trim();
+    if (!trimmed || isNaN(Number(trimmed))) {
+      setRefreshMsg({ ok: false, text: "Enter the Draft Group ID first." });
+      return;
+    }
+    // Always treat as draftGroupId for refresh (we need it for LineStar cross-ref)
+    const dgId = trimmed.length >= 9
+      ? null   // contest ID — need to resolve first via Fetch Slate
+      : Number(trimmed);
+    if (!dgId) {
+      setRefreshMsg({ ok: false, text: "Enter a Draft Group ID (6-digit) to refresh, not a Contest ID." });
+      return;
+    }
+    setIsRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const res = await refreshLinestarApi(dgId);
+      setRefreshMsg({ ok: res.success, text: res.message });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const handleOptimize = async () => {
     if (filteredPlayers.length < 8) return;
     setIsOptimizing(true);
@@ -403,6 +429,9 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
               onApiIdChange={setApiId}
               onApiLoad={handleApiLoad}
               apiMessage={apiMsg}
+              onRefresh={handleRefreshLineStar}
+              isRefreshing={isRefreshing}
+              refreshMessage={refreshMsg}
             />
           </CardContent>
         </Card>
@@ -748,6 +777,9 @@ function SplitUploadPanel({
   onApiIdChange,
   onApiLoad,
   apiMessage,
+  onRefresh,
+  isRefreshing = false,
+  refreshMessage,
 }: {
   dkFileRef: React.RefObject<HTMLInputElement | null>;
   lsFileRef: React.RefObject<HTMLInputElement | null>;
@@ -761,6 +793,9 @@ function SplitUploadPanel({
   onApiIdChange: (v: string) => void;
   onApiLoad: () => void;
   apiMessage: { ok: boolean; text: string; gameCount?: number; playerCount?: number; lockTime?: string; teams?: string[] } | null;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
+  refreshMessage?: { ok: boolean; text: string } | null;
 }) {
   return (
     <div className="space-y-4">
@@ -830,6 +865,11 @@ function SplitUploadPanel({
         <Button size="sm" variant="outline" onClick={onApiLoad} disabled={isPending || !apiId.trim()}>
           {isPending ? "Loading…" : "Fetch Slate"}
         </Button>
+        {onRefresh && (
+          <Button size="sm" variant="ghost" onClick={onRefresh} disabled={isRefreshing || !apiId.trim()} title="Re-fetch LineStar projections and ownership (picks up injuries and ownership shifts)">
+            {isRefreshing ? "Refreshing…" : "Refresh Projections"}
+          </Button>
+        )}
       </div>
       {apiMessage && (
         <div className={`text-xs ${apiMessage.ok ? "text-green-600" : "text-red-500"}`}>
@@ -844,6 +884,11 @@ function SplitUploadPanel({
             <p className="text-muted-foreground font-mono">{apiMessage.teams.join(" · ")}</p>
           )}
         </div>
+      )}
+      {refreshMessage && (
+        <p className={`text-xs ${refreshMessage.ok ? "text-green-600" : "text-red-500"}`}>
+          {refreshMessage.text}
+        </p>
       )}
     </div>
     </div>

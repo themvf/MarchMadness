@@ -494,6 +494,78 @@ export async function refreshLinestarProjs(
   }
 }
 
+/**
+ * Re-fetch LineStar projections + ownership via API for the latest slate.
+ * Use this to pick up injury updates, late scratches, or ownership shifts
+ * without reloading DK salary data.
+ *
+ * Requires DNN_COOKIE env var. The draftGroupId tells us which LineStar
+ * slate to pull (same ID used when the slate was first loaded).
+ */
+export async function refreshLinestarApi(
+  draftGroupId: number
+): Promise<{ success: boolean; message: string; updated: number }> {
+  const dnnCookie = process.env.DNN_COOKIE;
+  if (!dnnCookie) {
+    return { success: false, message: "DNN_COOKIE env var not set.", updated: 0 };
+  }
+
+  try {
+    const linestarData = await fetchLinestarData(draftGroupId, dnnCookie);
+    if (linestarData.size === 0) {
+      return { success: false, message: "LineStar returned no players.", updated: 0 };
+    }
+
+    // Load current slate players with win probs for leverage recalc
+    const rows = await db.execute<{
+      id: number; name: string; salary: number;
+      ourProj: number | null; winProb: number | null; vegasWinProb: number | null;
+    }>(sql`
+      SELECT dp.id, dp.name, dp.salary, dp.our_proj as "ourProj",
+             CASE WHEN bm.team_a_id = dp.team_id THEN bm.model_prob_a
+                  ELSE 1 - bm.model_prob_a END as "winProb",
+             CASE WHEN bm.team_a_id = dp.team_id THEN bm.vegas_prob_a
+                  ELSE 1 - bm.vegas_prob_a END as "vegasWinProb"
+      FROM dk_players dp
+      LEFT JOIN bracket_matchups bm ON bm.id = dp.matchup_id
+      WHERE dp.slate_id = (SELECT id FROM dk_slates ORDER BY slate_date DESC LIMIT 1)
+    `);
+
+    let updated = 0;
+    for (const row of rows.rows) {
+      const lsKey = `${row.name.toLowerCase()}|${row.salary}`;
+      const lsData = linestarData.get(lsKey);
+      if (!lsData) continue;
+
+      const isOut = lsData.isOut;
+      const projForLeverage = isOut ? 0 : (row.ourProj ?? lsData.linestarProj);
+      const ourLeverage = (projForLeverage != null && projForLeverage > 0 && lsData.projOwnPct != null)
+        ? computeLeverage(projForLeverage, lsData.projOwnPct, row.winProb ?? null, row.vegasWinProb ?? null)
+        : null;
+
+      await db
+        .update(dkPlayers)
+        .set({
+          linestarProj: lsData.linestarProj,
+          projOwnPct: lsData.projOwnPct,
+          ourLeverage,
+        })
+        .where(eq(dkPlayers.id, row.id));
+      updated++;
+    }
+
+    revalidatePath("/dfs");
+    return {
+      success: true,
+      message: `Updated ${updated} / ${rows.rows.length} players from LineStar API.`,
+      updated,
+    };
+  } catch (err) {
+    console.error("refreshLinestarApi error:", err);
+    return { success: false, message: String(err), updated: 0 };
+  }
+}
+
 export async function exportLineups(
   lineups: GeneratedLineup[],
   entryTemplateCsv: string
@@ -682,7 +754,7 @@ export async function loadSlateFromApi(
 
     // ── LineStar API fetch (if DNN_COOKIE env var is set) ──────
     // Returns Map<"name_lower|salary" → {linestarProj, projOwnPct}>
-    let linestarData: Map<string, { linestarProj: number; projOwnPct: number }> = new Map();
+    let linestarData: Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }> = new Map();
     const dnnCookie = process.env.DNN_COOKIE;
     if (dnnCookie) {
       try {
@@ -730,8 +802,11 @@ export async function loadSlateFromApi(
 
       const linestarProj = lsData?.linestarProj ?? null;
       const projOwnPct = lsData?.projOwnPct ?? null;
-      const projForLeverage = ourProj ?? linestarProj;
-      const ourLeverage = (projForLeverage != null && projOwnPct != null)
+      const isOut = lsData?.isOut ?? false;
+      // If LineStar marks player OUT/injured, zero their leverage so the
+      // optimizer excludes them even if our model has a non-zero ourProj.
+      const projForLeverage = isOut ? 0 : (ourProj ?? linestarProj);
+      const ourLeverage = (projForLeverage != null && projForLeverage > 0 && projOwnPct != null)
         ? computeLeverage(projForLeverage, projOwnPct, winProb, vegasWinProb)
         : null;
 
@@ -805,7 +880,7 @@ const LS_HEADERS = {
 async function fetchLinestarData(
   draftGroupId: number,
   dnnCookie: string
-): Promise<Map<string, { linestarProj: number; projOwnPct: number }>> {
+): Promise<Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }>> {
   const periodId = await findLinestarPeriodId(draftGroupId, dnnCookie);
   const data = await lsGetSalariesV5(periodId, dnnCookie);
 
@@ -823,14 +898,15 @@ async function fetchLinestarData(
   const ownershipRaw = ownershipBlock?.Projected ?? {};
   const ownershipMap = averageOwnershipBySalaryId(ownershipRaw);
 
-  const result = new Map<string, { linestarProj: number; projOwnPct: number }>();
+  const result = new Map<string, { linestarProj: number; projOwnPct: number; isOut: boolean }>();
   for (const p of salaries) {
     const proj = typeof p.PP === "number" ? p.PP : parseFloat(p.PP as unknown as string) || 0;
     const ownPct = ownershipMap.get(p.Id) ?? 0;
-    // Skip definite scratches with no projection
-    if (proj === 0 && ownPct === 0 && (p.IS === 1 || p.STAT === 4)) continue;
+    const isOut = p.IS === 1 || p.STAT === 4;
+    // Include injured/out players with proj=0 so re-fetches overwrite stale DB values.
+    // Optimizer's score > 0 filter handles exclusion.
     const key = `${(p.Name ?? "").toLowerCase()}|${p.SAL}`;
-    result.set(key, { linestarProj: proj, projOwnPct: ownPct });
+    result.set(key, { linestarProj: proj, projOwnPct: ownPct, isOut });
   }
   return result;
 }

@@ -343,7 +343,9 @@ def build_player_pool(
         # Use our_proj when available; fall back to linestar_proj so players
         # without a stat match (can't compute our_proj) are still visible to
         # the GPP optimizer rather than silently excluded.
-        proj_for_leverage = our_proj or result.get("linestar_proj")
+        # If LineStar marks the player OUT, zero leverage so optimizer excludes them.
+        is_out = result.get("is_out", False)
+        proj_for_leverage = 0 if is_out else (our_proj or result.get("linestar_proj"))
         our_leverage = None
         if proj_for_leverage and result.get("proj_own_pct") is not None:
             our_leverage = compute_leverage(
