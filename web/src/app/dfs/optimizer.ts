@@ -24,7 +24,7 @@ type SolverModel = {
   opType: "max" | "min";
   constraints: Record<string, { min?: number; max?: number; equal?: number }>;
   variables: Record<string, Record<string, number>>;
-  ints: Record<string, number>;
+  binaries: Record<string, number>;
 };
 
 type SolverResult = Record<string, number> & { feasible: boolean; result: number };
@@ -167,7 +167,7 @@ function solveOneLineup(
   }
 
   const variables: SolverModel["variables"] = {};
-  const ints: SolverModel["ints"] = {};
+  const binaries: SolverModel["binaries"] = {};
 
   // Player variables
   for (const p of pool) {
@@ -201,7 +201,7 @@ function solveOneLineup(
     }
 
     variables[key] = entry;
-    ints[key] = 1;
+    binaries[key] = 1;
   }
 
   // Stack helper variables z_T (binary: 1 = this team is the stacked team)
@@ -211,7 +211,7 @@ function solveOneLineup(
       stack_count: 1,
       [`team_${team}`]: -minStack, // sum(team players) - minStack * z_T >= 0
     };
-    ints[key] = 1;
+    binaries[key] = 1;
   }
 
   const model: SolverModel = {
@@ -219,7 +219,7 @@ function solveOneLineup(
     opType: "max",
     constraints,
     variables,
-    ints,
+    binaries,
   };
 
   const result = solver.Solve(model);
