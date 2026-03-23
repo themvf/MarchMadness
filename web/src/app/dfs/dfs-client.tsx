@@ -292,6 +292,67 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
     }
   };
 
+  const handleAnalysisExport = () => {
+    if (!lineups || lineups.length === 0) return;
+
+    const slotOrder: string[] = ["G", "G2", "G3", "F", "F2", "F3", "UTIL", "UTIL2"];
+    const slotLabel: Record<string, string> = {
+      G: "G", G2: "G", G3: "G", F: "F", F2: "F", F3: "F", UTIL: "UTIL", UTIL2: "UTIL",
+    };
+
+    const rows: string[] = [];
+    rows.push(
+      "Lineup,Slot,Name,Team,Pos,Salary,LS Proj,Our Proj,Own%,Leverage"
+    );
+
+    for (let i = 0; i < lineups.length; i++) {
+      const lu = lineups[i];
+      for (const slotKey of slotOrder) {
+        const p = lu.slots[slotKey as keyof typeof lu.slots];
+        if (!p) continue;
+        rows.push(
+          [
+            i + 1,
+            slotLabel[slotKey],
+            `"${p.name}"`,
+            p.teamAbbrev,
+            p.eligiblePositions,
+            p.salary,
+            p.linestarProj?.toFixed(1) ?? "",
+            p.ourProj?.toFixed(1) ?? "",
+            p.projOwnPct?.toFixed(1) ?? "",
+            p.ourLeverage?.toFixed(2) ?? "",
+          ].join(",")
+        );
+      }
+      // Summary row per lineup
+      rows.push(
+        [
+          i + 1,
+          "TOTAL",
+          `"${lu.players.map((p) => p.name).join(" / ")}"`,
+          "",
+          "",
+          lu.totalSalary,
+          lu.players.reduce((s, p) => s + (p.linestarProj ?? 0), 0).toFixed(1),
+          lu.projFpts.toFixed(1),
+          (lu.players.reduce((s, p) => s + (p.projOwnPct ?? 0), 0) / lu.players.length).toFixed(1),
+          lu.leverageScore.toFixed(2),
+        ].join(",")
+      );
+      rows.push(""); // blank row between lineups
+    }
+
+    const csv = rows.join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dfs_analysis_${slateDate ?? "slate"}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const toggleGame = (key: string) => {
     setSelectedGames((prev) => {
       const next = new Set(prev);
@@ -638,14 +699,23 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
                 value={entryTemplate}
                 onChange={(e) => setEntryTemplate(e.target.value)}
               />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleExport}
-                disabled={isExporting}
-              >
-                {isExporting ? "Exporting…" : "Download CSV"}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleExport}
+                  disabled={isExporting}
+                >
+                  {isExporting ? "Exporting…" : "DK Upload CSV"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleAnalysisExport}
+                >
+                  Analysis CSV
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
