@@ -389,6 +389,8 @@ def run(
     linestar_path: str | None = None,
     draft_group_id: int | None = None,
     contest_id: int | None = None,
+    linestar_api: bool = False,
+    dnn_cookie: str | None = None,
     date_override: str | None = None,
     season: int = 2026,
 ) -> None:
@@ -399,14 +401,17 @@ def run(
         draft_group_id — fetch from DK API using draftGroupId
         contest_id     — resolve to draftGroupId via API, then fetch
 
-    LineStar source (optional):
+    LineStar source (optional, choose one):
         linestar_path  — path to LineStar projections CSV
+        linestar_api   — fetch from LineStar API using DNN_COOKIE env var
+                         (requires draft_group_id to be resolved first)
         If omitted, linestar_proj and proj_own_pct will be NULL for all players.
     """
     config = load_config()
     db = DatabaseManager(config.database_url)
 
     # ── DK player source ─────────────────────────────────────
+    dgid: int | None = None
     if draft_group_id or contest_id:
         from ingest.dk_api import fetch_dk_players, fetch_draft_group_id as _resolve_dgid
         dgid = draft_group_id or _resolve_dgid(contest_id)
@@ -424,7 +429,19 @@ def run(
         with open(linestar_path, encoding="utf-8-sig") as f:
             ls_content = f.read()
         linestar_map = parse_linestar_csv(ls_content)
-        print(f"LineStar: {len(linestar_map)} entries parsed")
+        print(f"LineStar CSV: {len(linestar_map)} entries parsed")
+    elif linestar_api:
+        if not dgid:
+            raise ValueError(
+                "--linestar-api requires --draft-group-id or --contest-id "
+                "(so the draftGroupId is known to cross-reference with LineStar's slate list)"
+            )
+        from ingest.linestar_fetch import fetch_linestar_for_draft_group
+        import os
+        cookie = dnn_cookie or os.environ.get("DNN_COOKIE", "")
+        print("LineStar API: fetching projections + ownership...")
+        linestar_map = fetch_linestar_for_draft_group(dgid, dnn_cookie=cookie)
+        print(f"LineStar API: {len(linestar_map)} entries fetched")
     else:
         linestar_map = {}
         print("LineStar: not provided — linestar_proj and proj_own_pct will be NULL")
@@ -498,7 +515,10 @@ if __name__ == "__main__":
             "  # API workflow with contest ID from DK lobby URL:\n"
             "  python -m ingest.dk_slate --contest-id 189058648 --linestar LineStar.csv\n\n"
             "  # Fully automated (no CSV files at all — own% will be NULL):\n"
-            "  python -m ingest.dk_slate --draft-group-id 144324\n"
+            "  python -m ingest.dk_slate --draft-group-id 144324\n\n"
+            "  # Fully automated WITH LineStar projections + ownership:\n"
+            "  python -m ingest.dk_slate --draft-group-id 144324 --linestar-api\n"
+            "  # (requires DNN_COOKIE=<your .DOTNETNUKE cookie> in .env)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -516,6 +536,19 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--linestar", help="Path to LineStar projections CSV (optional)")
+    parser.add_argument(
+        "--linestar-api", action="store_true",
+        help=(
+            "Fetch LineStar projections + ownership via API instead of CSV. "
+            "Requires DNN_COOKIE env var (your LineStar .DOTNETNUKE session cookie). "
+            "Must be used with --draft-group-id or --contest-id."
+        ),
+    )
+    parser.add_argument(
+        "--dnn-cookie",
+        default=None,
+        help="Override DNN_COOKIE env var — value of .DOTNETNUKE session cookie",
+    )
     parser.add_argument("--date", help="Slate date override (YYYY-MM-DD)")
     parser.add_argument("--season", type=int, default=2026)
     args = parser.parse_args()
@@ -525,6 +558,8 @@ if __name__ == "__main__":
         linestar_path=args.linestar,
         draft_group_id=args.draft_group_id,
         contest_id=args.contest_id,
+        linestar_api=args.linestar_api,
+        dnn_cookie=args.dnn_cookie,
         date_override=args.date,
         season=args.season,
     )

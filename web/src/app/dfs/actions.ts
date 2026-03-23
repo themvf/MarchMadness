@@ -680,8 +680,23 @@ export async function loadSlateFromApi(
       statsByTeam.get(ps.teamId)!.push(ps);
     }
 
-    // Save each player (no LineStar — linestarProj and projOwnPct will be NULL)
+    // ── LineStar API fetch (if DNN_COOKIE env var is set) ──────
+    // Returns Map<"name_lower|salary" → {linestarProj, projOwnPct}>
+    let linestarData: Map<string, { linestarProj: number; projOwnPct: number }> = new Map();
+    const dnnCookie = process.env.DNN_COOKIE;
+    if (dnnCookie) {
+      try {
+        linestarData = await fetchLinestarData(draftGroupId, dnnCookie);
+        console.log(`LineStar API: ${linestarData.size} players fetched`);
+      } catch (lsErr) {
+        console.warn("LineStar API fetch failed (continuing without it):", lsErr);
+      }
+    }
+
+    // Save each player
     for (const p of dkPlayerList) {
+      const lsKey = `${p.name.toLowerCase()}|${p.salary}`;
+      const lsData = linestarData.get(lsKey);
       const teamId = matchTeamId(p.teamAbbrev, teamCache);
       const matchup = teamId ? matchupByTeam.get(teamId) : null;
 
@@ -713,6 +728,13 @@ export async function loadSlateFromApi(
         );
       }
 
+      const linestarProj = lsData?.linestarProj ?? null;
+      const projOwnPct = lsData?.projOwnPct ?? null;
+      const projForLeverage = ourProj ?? linestarProj;
+      const ourLeverage = (projForLeverage != null && projOwnPct != null)
+        ? computeLeverage(projForLeverage, projOwnPct, winProb, vegasWinProb)
+        : null;
+
       await db
         .insert(dkPlayers)
         .values({
@@ -726,10 +748,10 @@ export async function loadSlateFromApi(
           matchupId: matchup?.id ?? undefined,
           gameInfo: p.gameInfo,
           avgFptsDk: p.avgFptsDk,
-          linestarProj: null,
-          projOwnPct: null,
+          linestarProj,
+          projOwnPct,
           ourProj,
-          ourLeverage: null,
+          ourLeverage,
         })
         .onConflictDoUpdate({
           target: [dkPlayers.slateId, dkPlayers.dkPlayerId],
@@ -738,7 +760,10 @@ export async function loadSlateFromApi(
             avgFptsDk: p.avgFptsDk ?? undefined,
             teamId: teamId ?? undefined,
             matchupId: matchup?.id ?? undefined,
+            linestarProj: linestarProj ?? undefined,
+            projOwnPct: projOwnPct ?? undefined,
             ourProj: ourProj ?? undefined,
+            ourLeverage: ourLeverage ?? undefined,
           },
         });
     }
@@ -758,4 +783,129 @@ export async function loadSlateFromApi(
     console.error("loadSlateFromApi error:", err);
     return { success: false, message: String(err) };
   }
+}
+
+// ── LineStar API helpers ──────────────────────────────────────
+
+const LS_BASE = "https://www.linestarapp.com";
+const LS_SITE = 1;   // DraftKings
+const LS_SPORT = 4;  // College Basketball
+const LS_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+  "Accept": "application/json",
+  "Referer": "https://www.linestarapp.com/DesktopModules/DailyFantasyApi/",
+};
+
+/**
+ * Fetch LineStar projections + ownership for a DK draftGroupId.
+ *
+ * Returns Map<"name_lower|salary" → {linestarProj, projOwnPct}>.
+ * Compatible with the DB upsert pipeline in loadSlateFromApi.
+ */
+async function fetchLinestarData(
+  draftGroupId: number,
+  dnnCookie: string
+): Promise<Map<string, { linestarProj: number; projOwnPct: number }>> {
+  const periodId = await findLinestarPeriodId(draftGroupId, dnnCookie);
+  const data = await lsGetSalariesV5(periodId, dnnCookie);
+
+  // Parse SalaryContainerJson
+  const scj = (data.SalaryContainerJson as string | null | undefined) ?? "{}";
+  let container: { Salaries?: Array<{
+    Id: number; Name: string; SAL: number; PP: number; IS?: number; STAT?: number;
+  }> } = {};
+  try { container = JSON.parse(scj); } catch { /* ignore */ }
+
+  const salaries = container.Salaries ?? [];
+
+  // Build ownership map: salaryId → avg ownership %
+  const ownershipBlock = (data.Ownership as { Projected?: Record<string, Array<{ SalaryId: number; Owned: number }>> } | undefined);
+  const ownershipRaw = ownershipBlock?.Projected ?? {};
+  const ownershipMap = averageOwnershipBySalaryId(ownershipRaw);
+
+  const result = new Map<string, { linestarProj: number; projOwnPct: number }>();
+  for (const p of salaries) {
+    const proj = typeof p.PP === "number" ? p.PP : parseFloat(p.PP as unknown as string) || 0;
+    const ownPct = ownershipMap.get(p.Id) ?? 0;
+    // Skip definite scratches with no projection
+    if (proj === 0 && ownPct === 0 && (p.IS === 1 || p.STAT === 4)) continue;
+    const key = `${(p.Name ?? "").toLowerCase()}|${p.SAL}`;
+    result.set(key, { linestarProj: proj, projOwnPct: ownPct });
+  }
+  return result;
+}
+
+async function findLinestarPeriodId(draftGroupId: number, dnnCookie: string): Promise<number> {
+  // GetPeriodInformation — try without auth first, then with
+  const infoUrl = `${LS_BASE}/DesktopModules/DailyFantasyApi/API/Fantasy/GetPeriodInformation?site=${LS_SITE}&sport=${LS_SPORT}`;
+  let periodsData: unknown;
+  try {
+    const res = await fetch(infoUrl, { headers: LS_HEADERS, cache: "no-store" });
+    periodsData = await res.json();
+  } catch {
+    const res = await fetch(infoUrl, {
+      headers: { ...LS_HEADERS, Cookie: `.DOTNETNUKE=${dnnCookie}` },
+      cache: "no-store",
+    });
+    periodsData = await res.json();
+  }
+
+  const periods: Array<{ PeriodId?: number; Id?: number }> = Array.isArray(periodsData)
+    ? periodsData
+    : ((periodsData as { Periods?: unknown[] }).Periods ?? []);
+
+  if (!periods.length) {
+    throw new Error("GetPeriodInformation returned no periods");
+  }
+
+  // Scan most-recent periods until we find one whose Slates contain our draftGroupId
+  for (const period of periods.slice(0, 10)) {
+    const pid = period.PeriodId ?? period.Id;
+    if (!pid) continue;
+    try {
+      const data = await lsGetSalariesV5(pid, dnnCookie);
+      const slates = (data.Slates ?? []) as Array<{ PeriodId?: number; DfsSlateId?: number }>;
+      if (slates.some((s) => s.DfsSlateId === draftGroupId)) {
+        return pid;
+      }
+    } catch { /* skip period */ }
+  }
+
+  throw new Error(
+    `No LineStar slate found for DK draftGroupId ${draftGroupId}. ` +
+    "Slate may not be available on LineStar yet."
+  );
+}
+
+async function lsGetSalariesV5(periodId: number, dnnCookie: string): Promise<Record<string, unknown>> {
+  const url = `${LS_BASE}/DesktopModules/DailyFantasyApi/API/Fantasy/GetSalariesV5` +
+              `?periodId=${periodId}&site=${LS_SITE}&sport=${LS_SPORT}`;
+  const headers: Record<string, string> = { ...LS_HEADERS };
+  if (dnnCookie) headers["Cookie"] = `.DOTNETNUKE=${dnnCookie}`;
+
+  const res = await fetch(url, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`LineStar GetSalariesV5 returned ${res.status}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+function averageOwnershipBySalaryId(
+  ownershipRaw: Record<string, Array<{ SalaryId: number; Owned: number }>>
+): Map<number, number> {
+  const totals = new Map<number, number>();
+  const counts = new Map<number, number>();
+  for (const entries of Object.values(ownershipRaw)) {
+    if (!Array.isArray(entries)) continue;
+    for (const e of entries) {
+      const owned = typeof e.Owned === "number" ? e.Owned : parseFloat(e.Owned as unknown as string);
+      if (e.SalaryId != null && !isNaN(owned)) {
+        totals.set(e.SalaryId, (totals.get(e.SalaryId) ?? 0) + owned);
+        counts.set(e.SalaryId, (counts.get(e.SalaryId) ?? 0) + 1);
+      }
+    }
+  }
+  const result = new Map<number, number>();
+  for (const [sid, total] of totals) {
+    result.set(sid, total / counts.get(sid)!);
+  }
+  return result;
 }
