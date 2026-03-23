@@ -472,6 +472,9 @@ export default function DfsClient({ players, slateDate, accuracy, comparison, st
             onApiIdChange={setApiId}
             onApiLoad={handleApiLoad}
             apiMessage={apiMsg}
+            onRefresh={handleRefreshLineStar}
+            isRefreshing={isRefreshing}
+            refreshMessage={refreshMsg}
           />
         </CardContent>
       </Card>
