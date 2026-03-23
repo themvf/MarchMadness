@@ -961,50 +961,55 @@ async function fetchLinestarData(
 }
 
 async function findLinestarPeriodId(draftGroupId: number, dnnCookie: string): Promise<number> {
-  // 1. Manual override via env var — use this when GetPeriodInformation fails
-  //    (it only returns upcoming slates; returns empty once games are in progress).
-  const envPeriodId = process.env.LINESTAR_PERIOD_ID;
-  if (envPeriodId) {
-    const pid = parseInt(envPeriodId, 10);
-    if (!isNaN(pid)) return pid;
+  // Helper: call GetSalariesV5 for a candidate pid and check if its Slates
+  // array contains our draftGroupId. Returns the pid on match, null otherwise.
+  async function probe(pid: number): Promise<number | null> {
+    try {
+      const data = await lsGetSalariesV5(pid, dnnCookie);
+      const slates = (data.Slates ?? []) as Array<{ DfsSlateId?: number }>;
+      return slates.some((s) => s.DfsSlateId === draftGroupId) ? pid : null;
+    } catch { return null; }
   }
 
-  // 2. Call GetPeriodInformation WITH auth (always — unauthenticated returns HTTP 200
-  //    but with empty data, silently blocking the auth retry in a try/catch).
+  // 1. Primary: GetPeriodInformation WITH auth (always — unauthenticated returns
+  //    HTTP 200 with empty data, silently blocking a try/catch auth retry).
+  //    This works before games start; returns empty once games are in progress.
   const infoUrl = `${LS_BASE}/DesktopModules/DailyFantasyApi/API/Fantasy/GetPeriodInformation?site=${LS_SITE}&sport=${LS_SPORT}`;
   const headers: Record<string, string> = { ...LS_HEADERS };
   if (dnnCookie) headers["Cookie"] = `.DOTNETNUKE=${dnnCookie}`;
-  const res = await fetch(infoUrl, { headers, cache: "no-store" });
-  if (!res.ok) throw new Error(`GetPeriodInformation returned ${res.status}`);
-  const periodsData: unknown = await res.json();
-
-  const periods: Array<{ PeriodId?: number; Id?: number }> = Array.isArray(periodsData)
-    ? periodsData
-    : ((periodsData as { Periods?: unknown[] }).Periods ?? []);
-
-  if (!periods.length) {
-    throw new Error(
-      "GetPeriodInformation returned no periods — the slate may already be in progress. " +
-      "Set the LINESTAR_PERIOD_ID env var in Vercel to bypass discovery."
-    );
-  }
-
-  // 3. Scan most-recent periods until we find one whose Slates contain our draftGroupId
-  for (const period of periods.slice(0, 10)) {
-    const pid = period.PeriodId ?? period.Id;
-    if (!pid) continue;
-    try {
-      const data = await lsGetSalariesV5(pid, dnnCookie);
-      const slates = (data.Slates ?? []) as Array<{ PeriodId?: number; DfsSlateId?: number }>;
-      if (slates.some((s) => s.DfsSlateId === draftGroupId)) {
-        return pid;
+  try {
+    const res = await fetch(infoUrl, { headers, cache: "no-store" });
+    if (res.ok) {
+      const periodsData: unknown = await res.json();
+      const periods: Array<{ PeriodId?: number; Id?: number }> = Array.isArray(periodsData)
+        ? periodsData
+        : ((periodsData as { Periods?: unknown[] }).Periods ?? []);
+      for (const period of periods.slice(0, 10)) {
+        const pid = period.PeriodId ?? period.Id;
+        if (!pid) continue;
+        const match = await probe(pid);
+        if (match) return match;
       }
-    } catch { /* skip period */ }
+    }
+  } catch { /* network error — fall through to probe scan */ }
+
+  // 2. Fallback: probe scan around LINESTAR_PERIOD_ID env var.
+  //    GetPeriodInformation only lists upcoming slates. Once games are in progress
+  //    it returns empty even with auth. Period IDs increment by ~1 per slate, so
+  //    scanning ±5 from a known baseline covers multiple tournament rounds without
+  //    needing manual updates each day.
+  const envHint = process.env.LINESTAR_PERIOD_ID ? parseInt(process.env.LINESTAR_PERIOD_ID, 10) : NaN;
+  if (!isNaN(envHint)) {
+    // Scan -3 to +5 (biased forward — we're more likely to have incremented)
+    for (let offset = -3; offset <= 5; offset++) {
+      const match = await probe(envHint + offset);
+      if (match) return match;
+    }
   }
 
   throw new Error(
-    `No LineStar slate found for DK draftGroupId ${draftGroupId}. ` +
-    "Set the LINESTAR_PERIOD_ID env var in Vercel to bypass discovery."
+    `LineStar: could not locate periodId for DK draftGroupId ${draftGroupId}. ` +
+    "Set LINESTAR_PERIOD_ID in Vercel to any nearby known period ID (exact value not required)."
   );
 }
 
